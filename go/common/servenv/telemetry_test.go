@@ -17,8 +17,10 @@ package servenv
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -267,6 +269,31 @@ func TestServEnvTelemetryIntegration(t *testing.T) {
 		// Verify specific HTTP client and server metrics
 		assert.True(t, metricNames["http.client.request.duration"], "should have http.client.request.duration metric")
 		assert.True(t, metricNames["http.server.request.duration"], "should have http.server.request.duration metric")
+	})
+
+	t.Run("Prometheus_MetricsEndpoint", func(t *testing.T) {
+		ctx := context.Background()
+
+		meter := otel.Meter("servenv-prometheus-test")
+		counter, err := meter.Int64Counter("multigres.test.prometheus.requests")
+		require.NoError(t, err)
+		counter.Add(ctx, 7)
+
+		resp, err := http.Get(httpURL + "/metrics")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		metrics := string(body)
+
+		require.Contains(t, resp.Header.Get("Content-Type"), "text/plain")
+		require.Contains(t, metrics, "go_goroutines")
+		require.Contains(t, metrics, "process_cpu_seconds_total")
+		require.Contains(t, metrics, "target_info")
+		require.Contains(t, metrics, "multigres_test_prometheus_requests_total")
+		require.True(t, strings.Contains(metrics, " 7\n") || strings.Contains(metrics, " 7.0\n"), "scrape should include recorded counter value:\n%s", metrics)
 	})
 
 	t.Run("GRPC_TracePropagation", func(t *testing.T) {

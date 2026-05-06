@@ -52,6 +52,9 @@ import (
 	"os"
 	"sync"
 
+	promclient "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
@@ -59,6 +62,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	otelprometheus "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
@@ -87,6 +91,7 @@ type Telemetry struct {
 	tracerProvider *sdktrace.TracerProvider
 	meterProvider  *sdkmetric.MeterProvider
 	loggerProvider *sdklog.LoggerProvider
+	promRegistry   *promclient.Registry
 	initialized    bool
 
 	// Test overrides (only used in tests)
@@ -230,7 +235,7 @@ func (t *Telemetry) initTracing(ctx context.Context, res *resource.Resource) err
 	return nil
 }
 
-// initMetrics initializes the MeterProvider with dual exporters (autoexport + Prometheus)
+// initMetrics initializes the MeterProvider with dual exporters (autoexport + Prometheus).
 func (t *Telemetry) initMetrics(ctx context.Context, res *resource.Resource) error {
 	var metricReader sdkmetric.Reader
 	var err error
@@ -251,10 +256,23 @@ func (t *Telemetry) initMetrics(ctx context.Context, res *resource.Resource) err
 		}
 	}
 
+	t.promRegistry = promclient.NewRegistry()
+	if err := t.promRegistry.Register(collectors.NewGoCollector()); err != nil {
+		return fmt.Errorf("failed to register prometheus Go collector: %w", err)
+	}
+	if err := t.promRegistry.Register(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{})); err != nil {
+		return fmt.Errorf("failed to register prometheus process collector: %w", err)
+	}
+
+	promExporter, err := otelprometheus.New(otelprometheus.WithRegisterer(t.promRegistry))
+	if err != nil {
+		return fmt.Errorf("failed to create prometheus exporter: %w", err)
+	}
+
 	t.meterProvider = sdkmetric.NewMeterProvider(
-		// TODO(dweitzman): Add an additional prometheus exporter that's always at /metrics for debugging
 		sdkmetric.WithResource(res),
 		sdkmetric.WithReader(metricReader), // Configured via env vars or test reader
+		sdkmetric.WithReader(promExporter),
 	)
 
 	// Set global meter provider
@@ -305,6 +323,21 @@ func (t *Telemetry) initLogs(ctx context.Context, res *resource.Resource) error 
 	)
 
 	return nil
+}
+
+// PrometheusHandler returns an HTTP handler that exposes the current MeterProvider
+// through Prometheus' text exposition format.
+func (t *Telemetry) PrometheusHandler() http.Handler {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.promRegistry == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "OpenTelemetry metrics are not initialized", http.StatusServiceUnavailable)
+		})
+	}
+
+	return promhttp.HandlerFor(t.promRegistry, promhttp.HandlerOpts{})
 }
 
 // WithEnvTraceparent parses the TRACEPARENT env variable and returns a context within that

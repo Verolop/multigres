@@ -72,5 +72,7 @@ func (sv *ServEnv) RegisterCommonHTTPEndpoints() {
 		_ = web.Templates.ExecuteTemplate(w, "isok.html", true)
 	})
 
+	sv.HTTPHandle("/metrics", sv.telemetry.PrometheusHandler())
+
 	sv.HTTPHandleFunc("/config", viperdebug.HandlerFunc(sv.reg))
 }
