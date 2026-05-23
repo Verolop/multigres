@@ -17,6 +17,8 @@ package command
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -165,4 +167,42 @@ func TestRunCrashRecovery_ContextCancelledDuringBackoff(t *testing.T) {
 	err := runCrashRecoveryAttempts(ctx, testLogger(), runner, retry.New(time.Hour, time.Hour))
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, 1, calls)
+}
+
+func TestWithRecoverySignalsDisabled(t *testing.T) {
+	dataDir := t.TempDir()
+	standbySignal := filepath.Join(dataDir, "standby.signal")
+	recoverySignal := filepath.Join(dataDir, "recovery.signal")
+	require.NoError(t, os.WriteFile(standbySignal, nil, 0o644))
+	require.NoError(t, os.WriteFile(recoverySignal, nil, 0o644))
+
+	err := withRecoverySignalsDisabled(dataDir, testLogger(), func() error {
+		assert.NoFileExists(t, standbySignal)
+		assert.NoFileExists(t, recoverySignal)
+		assert.FileExists(t, standbySignal+".crash-recovery-disabled")
+		assert.FileExists(t, recoverySignal+".crash-recovery-disabled")
+		return nil
+	})
+
+	require.NoError(t, err)
+	assert.FileExists(t, standbySignal)
+	assert.FileExists(t, recoverySignal)
+	assert.NoFileExists(t, standbySignal+".crash-recovery-disabled")
+	assert.NoFileExists(t, recoverySignal+".crash-recovery-disabled")
+}
+
+func TestWithRecoverySignalsDisabledRestoresAfterError(t *testing.T) {
+	dataDir := t.TempDir()
+	standbySignal := filepath.Join(dataDir, "standby.signal")
+	require.NoError(t, os.WriteFile(standbySignal, nil, 0o644))
+
+	expectedErr := errors.New("recovery failed")
+	err := withRecoverySignalsDisabled(dataDir, testLogger(), func() error {
+		assert.NoFileExists(t, standbySignal)
+		return expectedErr
+	})
+
+	require.ErrorIs(t, err, expectedErr)
+	assert.FileExists(t, standbySignal)
+	assert.NoFileExists(t, standbySignal+".crash-recovery-disabled")
 }

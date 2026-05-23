@@ -904,16 +904,37 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 	//     postgres was unavailable.
 	pm.consensusState.RecordTermPrimary(rule, leader)
 
+	// A standby with rewindPending=true was emergency-demoted earlier and still
+	// has divergent WAL relative to the new primary. Routing through
+	// demoteStalePrimaryLocked runs pg_rewind, which clears rewindPending and
+	// makes the node recruitable again. Without this, the lightweight standby
+	// branch sets primary_conninfo but leaves the WAL divergent, and the next
+	// Recruit refuses with "rewind pending after emergency demotion".
+	needsRewind := pm.rewindPending.Load()
+	knownPrimary := pm.getPoolerType() == clustermetadatapb.PoolerType_PRIMARY
+	needsDemoteRepair := needsRewind || knownPrimary
+
 	// Observe the freshest view of our rule. SetTermPrimary is the staleness gate,
-	// so we want authoritative state — not the cached snapshot.
+	// so we want authoritative state — not the cached snapshot. The exception is
+	// a pooler already known to need primary demotion: postgres may be stopped/
+	// closed as part of the prior emergency demotion, and the only recovery path
+	// is the stale-primary demotion branch below.
 	selfPos, err := pm.rules.observePosition(ctx)
 	if err != nil {
-		return nil, mterrors.Wrap(err, "failed to observe local position")
+		if !needsDemoteRepair {
+			return nil, mterrors.Wrap(err, "failed to observe local position")
+		}
+		selfPos = pm.rules.cachedPosition()
+		pm.logger.InfoContext(ctx, "SetTermPrimary: proceeding with stale-primary repair despite unavailable local position",
+			"incoming_rule", rule.GetRuleNumber(),
+			"known_primary", knownPrimary,
+			"rewind_pending", needsRewind,
+			"error", err)
 	}
 
 	// Compare by RuleNumber only — LSN is intentionally not part of the gate.
 	// See SetTermPrimaryRequest's proto comment for the reasoning.
-	if commonconsensus.CompareRuleNumbers(rule.GetRuleNumber(), selfPos.GetRule().GetRuleNumber()) <= 0 {
+	if selfPos != nil && commonconsensus.CompareRuleNumbers(rule.GetRuleNumber(), selfPos.GetRule().GetRuleNumber()) <= 0 {
 		pm.logger.InfoContext(ctx, "SetTermPrimary: incoming rule not higher, no-op",
 			"incoming_rule", rule.GetRuleNumber(),
 			"self_rule", selfPos.GetRule().GetRuleNumber())
@@ -927,18 +948,13 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 	// Decide between "standby update" and "stale-primary demote" based on
 	// actual postgres recovery state rather than topology — a node mid-promote
 	// or mid-demote may have a topology label that lags reality.
-	isPrimary, err := pm.isPrimary(ctx)
-	if err != nil {
-		return nil, mterrors.Wrap(err, "failed to check recovery status")
+	isPrimary := false
+	if !needsDemoteRepair {
+		isPrimary, err = pm.isPrimary(ctx)
+		if err != nil {
+			return nil, mterrors.Wrap(err, "failed to check recovery status")
+		}
 	}
-
-	// A standby with rewindPending=true was emergency-demoted earlier and still
-	// has divergent WAL relative to the new primary. Routing through
-	// demoteStalePrimaryLocked runs pg_rewind, which clears rewindPending and
-	// makes the node recruitable again. Without this, the lightweight standby
-	// branch sets primary_conninfo but leaves the WAL divergent, and the next
-	// Recruit refuses with "rewind pending after emergency demotion".
-	needsRewind := pm.rewindPending.Load()
 
 	// Reported to the gateway as the new leader's term. Not term validation —
 	// the rule compare above is the gate. SetTermPrimary does not bump the local
@@ -946,7 +962,7 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 	// an SetTermPrimary is a notification, not a revoke.
 	consensusTerm := rule.GetRuleNumber().GetCoordinatorTerm()
 
-	if isPrimary || needsRewind {
+	if isPrimary || needsDemoteRepair {
 		pm.logger.InfoContext(ctx, "SetTermPrimary: demoting stale primary",
 			"new_leader", leader.GetId().GetName(),
 			"incoming_rule", rule.GetRuleNumber(),
@@ -994,7 +1010,12 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 
 	cs, err := pm.getConsensusStatus(ctx)
 	if err != nil {
-		return nil, mterrors.Wrap(err, "failed to build consensus status after SetTermPrimary")
+		pm.logger.WarnContext(ctx, "Failed to build fresh consensus status after SetTermPrimary; falling back to cached status",
+			"error", err)
+		cs, err = pm.getInconsistentConsensusStatus(ctx)
+		if err != nil {
+			return nil, mterrors.Wrap(err, "failed to build consensus status after SetTermPrimary")
+		}
 	}
 	return &consensusdatapb.SetTermPrimaryResponse{ConsensusStatus: cs}, nil
 }

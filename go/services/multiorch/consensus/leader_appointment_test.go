@@ -1755,10 +1755,17 @@ func TestAppointInitialLeader(t *testing.T) {
 		mp2.Status.PostgresRunning = true
 		mp2.ConsensusStatus = &clustermetadatapb.ConsensusStatus{TermRevocation: &clustermetadatapb.TermRevocation{RevokedBelowTerm: 0}}
 
+		mp3 := createMockNode(fakeClient, "mp3", 0, "0/0800000", true, nil)
+		mp3.Status.IsInitialized = true
+		mp3.Status.PostgresReady = true
+		mp3.Status.PostgresRunning = true
+		mp3.ConsensusStatus = &clustermetadatapb.ConsensusStatus{TermRevocation: &clustermetadatapb.TermRevocation{RevokedBelowTerm: 0}}
+
 		require.NoError(t, ts.CreateMultiPooler(ctx, mp1.MultiPooler))
 		require.NoError(t, ts.CreateMultiPooler(ctx, mp2.MultiPooler))
+		require.NoError(t, ts.CreateMultiPooler(ctx, mp3.MultiPooler))
 
-		cohort := []*multiorchdatapb.PoolerHealthState{mp1, mp2}
+		cohort := []*multiorchdatapb.PoolerHealthState{mp1, mp2, mp3}
 
 		err := c.AppointInitialLeader(ctx, "shard0", cohort, "testdb")
 		require.NoError(t, err)
@@ -1823,7 +1830,29 @@ func TestAppointInitialLeader(t *testing.T) {
 
 		err := c.AppointInitialLeader(ctx, "shard0", cohort, "testdb")
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "pre-vote failed")
+		require.Contains(t, err.Error(), "insufficient initial cohort")
+	})
+
+	t.Run("cohort without spare returns error", func(t *testing.T) {
+		fakeClient := rpcclient.NewFakeClient()
+		ts, _ := memorytopo.NewServerAndFactory(ctx, "zone1")
+		defer ts.Close()
+
+		setupDatabase(t, ts, &clustermetadatapb.DurabilityPolicy{
+			PolicyName:    "AT_LEAST_2",
+			QuorumType:    clustermetadatapb.QuorumType_QUORUM_TYPE_AT_LEAST_N,
+			RequiredCount: 2,
+		})
+
+		c := NewCoordinator(coordID, ts, fakeClient, logger, false)
+
+		mp1 := createMockNode(fakeClient, "mp1", 0, "0/2000000", true, nil)
+		mp2 := createMockNode(fakeClient, "mp2", 0, "0/1000000", true, nil)
+		cohort := []*multiorchdatapb.PoolerHealthState{mp1, mp2}
+
+		err := c.AppointInitialLeader(ctx, "shard0", cohort, "testdb")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "initial cohort requires at least one spare pooler")
 	})
 }
 
@@ -1847,13 +1876,13 @@ func TestAppointInitialLeader_NewFlow(t *testing.T) {
 
 	c := NewCoordinator(coordID, ts, fakeClient, logger, true /* useNewFlow */)
 
-	// AT_LEAST_3 forces tryBuild to wait for all three recruits before
-	// quorum forms, making leader selection deterministic regardless of
-	// recruit-RPC completion order.
+	// AT_LEAST_3 plus the initial spare-member requirement gives us a
+	// 4-member bootstrap cohort.
 	cohortIDs := []*clustermetadatapb.ID{
 		{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "mp1"},
 		{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "mp2"},
 		{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "mp3"},
+		{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "mp4"},
 	}
 	// mp1 has the highest LSN; bootstrap should pick it as leader. Each node
 	// carries the zero-state sentinel rule that createSidecarSchema writes
@@ -1863,7 +1892,7 @@ func TestAppointInitialLeader_NewFlow(t *testing.T) {
 		RuleNumber:       &clustermetadatapb.RuleNumber{},
 		DurabilityPolicy: topoclient.AtLeastN(3),
 	}
-	walPositions := []string{"0/2000000", "0/1500000", "0/1000000"}
+	walPositions := []string{"0/2000000", "0/1500000", "0/1000000", "0/0800000"}
 	cohort := make([]*multiorchdatapb.PoolerHealthState, 0, len(cohortIDs))
 	for i, id := range cohortIDs {
 		mp := createMockNode(fakeClient, id.Name, 0, walPositions[i], true, sentinelRule)
@@ -1912,7 +1941,7 @@ func TestAppointInitialLeader_NewFlow(t *testing.T) {
 	propRule := propReq.GetProposal().GetProposedRule()
 	require.Equal(t, int64(1), propRule.GetRuleNumber().GetCoordinatorTerm())
 	require.Equal(t, int32(3), propRule.GetDurabilityPolicy().GetRequiredCount())
-	require.Len(t, propRule.GetCohortMembers(), 3)
+	require.Len(t, propRule.GetCohortMembers(), 4)
 
 	// Followers should receive SetTermPrimary carrying the same leader + rule.
 	for _, id := range cohortIDs[1:] {

@@ -16,9 +16,11 @@ package command
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -73,7 +75,9 @@ func extractClusterState(output string) string {
 // This runs postgres --single to complete crash recovery, then exits cleanly.
 func runCrashRecovery(ctx context.Context, logger *slog.Logger) error {
 	r := retry.New(constants.CrashRecoveryRetryDelay, constants.CrashRecoveryRetryDelay)
-	return runCrashRecoveryAttempts(ctx, logger, runSingleUserPostgres, r)
+	return withRecoverySignalsDisabled(pgctld.PostgresDataDir(), logger, func() error {
+		return runCrashRecoveryAttempts(ctx, logger, runSingleUserPostgres, r)
+	})
 }
 
 // runCrashRecoveryAttempts retries `postgres --single` while the lock file is held.
@@ -139,4 +143,75 @@ func runSingleUserPostgres(ctx context.Context) ([]byte, error) {
 
 	cmd.SetStdin(devNull)
 	return cmd.CombinedOutput()
+}
+
+// withRecoverySignalsDisabled hides standby/recovery signal files while running
+// single-user crash recovery. Single-user postgres refuses to start in standby
+// mode, but a failed standby restart can leave standby.signal behind while the
+// cluster still needs crash recovery before pg_rewind can proceed.
+func withRecoverySignalsDisabled(dataDir string, logger *slog.Logger, fn func() error) error {
+	restores := make([]func() error, 0, 2)
+	for _, name := range []string{"standby.signal", "recovery.signal"} {
+		restore, err := moveSignalAside(dataDir, name, logger)
+		if err != nil {
+			return err
+		}
+		if restore != nil {
+			restores = append(restores, restore)
+		}
+	}
+
+	runErr := fn()
+
+	var restoreErrs []error
+	for i := len(restores) - 1; i >= 0; i-- {
+		if err := restores[i](); err != nil {
+			restoreErrs = append(restoreErrs, err)
+		}
+	}
+	if len(restoreErrs) > 0 {
+		restoreErr := errors.Join(restoreErrs...)
+		if runErr != nil {
+			return errors.Join(runErr, restoreErr)
+		}
+		return restoreErr
+	}
+	return runErr
+}
+
+func moveSignalAside(dataDir, name string, logger *slog.Logger) (func() error, error) {
+	path := filepath.Join(dataDir, name)
+	disabledPath := path + ".crash-recovery-disabled"
+
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to stat %s: %w", path, err)
+	}
+
+	if err := os.Remove(disabledPath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to remove stale disabled signal %s: %w", disabledPath, err)
+	}
+	if err := os.Rename(path, disabledPath); err != nil {
+		return nil, fmt.Errorf("failed to move %s aside for crash recovery: %w", path, err)
+	}
+	logger.Info("Temporarily disabled PostgreSQL recovery signal for crash recovery",
+		"signal", name,
+		"path", path)
+
+	return func() error {
+		if _, err := os.Stat(path); err == nil {
+			return fmt.Errorf("cannot restore %s: file already exists", path)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to stat %s before restore: %w", path, err)
+		}
+		if err := os.Rename(disabledPath, path); err != nil {
+			return fmt.Errorf("failed to restore %s after crash recovery: %w", path, err)
+		}
+		logger.Info("Restored PostgreSQL recovery signal after crash recovery",
+			"signal", name,
+			"path", path)
+		return nil
+	}, nil
 }

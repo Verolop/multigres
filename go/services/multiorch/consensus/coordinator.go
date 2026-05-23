@@ -278,6 +278,10 @@ func (c *Coordinator) AppointInitialLeader(ctx context.Context, shardID string, 
 	if err != nil {
 		return mterrors.Wrap(err, "failed to load durability policy from topology")
 	}
+	if err := commonconsensus.CheckInitialCohortHeadroom(policy, poolerIDs(cohort)); err != nil {
+		return mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
+			"insufficient initial cohort for shard %s: %v", shardID, err)
+	}
 
 	if c.useNewFlow {
 		// Bootstrap has no outgoing cohort to recruit consent from, so we use

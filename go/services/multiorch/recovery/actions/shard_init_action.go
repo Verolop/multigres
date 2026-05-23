@@ -108,12 +108,13 @@ func (a *ShardInitAction) Execute(ctx context.Context, problem types.Problem) er
 		return mterrors.Wrap(err, "failed to parse durability policy")
 	}
 
-	// Ensure the initialized poolers we see could ever satisfy the durability policy.
+	// Ensure the initialized poolers we see can satisfy the durability policy
+	// and leave at least one spare member for recovery.
 	initializedIDs := make([]*clustermetadatapb.ID, len(initializedPoolers))
 	for i, p := range initializedPoolers {
 		initializedIDs[i] = p.MultiPooler.Id
 	}
-	if err := durabilityPolicy.CheckAchievable(initializedIDs); err != nil {
+	if err := commonconsensus.CheckInitialCohortHeadroom(policyProto, initializedIDs); err != nil {
 		return mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
 			"insufficient initialized poolers for initial cohort (have %d): %v", len(initializedPoolers), err)
 	}
@@ -145,7 +146,7 @@ func (a *ShardInitAction) Execute(ctx context.Context, problem types.Problem) er
 	for i, p := range committedCohort {
 		committedCohortIDs[i] = p.MultiPooler.Id
 	}
-	if err := durabilityPolicy.CheckAchievable(committedCohortIDs); err != nil {
+	if err := commonconsensus.CheckInitialCohortHeadroom(policyProto, committedCohortIDs); err != nil {
 		return mterrors.Errorf(mtrpcpb.Code_UNAVAILABLE,
 			"insufficient committed cohort poolers reachable (have %d of %d): %v",
 			len(committedCohort), len(committedIDs), err)

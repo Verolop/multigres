@@ -238,6 +238,7 @@ func TestSetTermPrimary_StandbyAppliesNewPrimary(t *testing.T) {
 		mock.MakeQueryResult(nil, nil))
 
 	pm, _ := setupManagerWithMockDB(t, mockQueryService, &fakeRuleStore{pos: makeRulePosition(3)})
+	pm.multipooler.Type = clustermetadatapb.PoolerType_REPLICA
 
 	leader := newLeaderAddress("new-primary", "primary-host", 5432)
 	req := &consensusdatapb.SetTermPrimaryRequest{
@@ -269,25 +270,21 @@ func TestSetTermPrimary_StandbyAppliesNewPrimary(t *testing.T) {
 func TestSetTermPrimary_StalePrimaryDemotes(t *testing.T) {
 	mockQueryService := mock.NewQueryService()
 
-	// 1. SetTermPrimary's own isPrimary check: not in recovery -> take the demote branch.
-	mockQueryService.AddQueryPatternOnce("SELECT pg_is_in_recovery",
-		mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"f"}}))
-
-	// 2. After restart, every subsequent pg_is_in_recovery must report standby.
+	// After restart, every pg_is_in_recovery check must report standby.
 	// Covers isInRecovery (verify after restart), resetSynchronousReplication's
 	// role check, and setPrimaryConnInfoLocked's guardrail.
 	mockQueryService.AddQueryPattern("SELECT pg_is_in_recovery",
 		mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"t"}}))
 
-	// 3. waitForDatabaseConnection polls SELECT 1 after the standby restart.
+	// waitForDatabaseConnection polls SELECT 1 after the standby restart.
 	mockQueryService.AddQueryPattern("^SELECT 1$", mock.MakeQueryResult(nil, nil))
 
-	// 4. resetSynchronousReplication clears sync standby list and reloads.
+	// resetSynchronousReplication clears sync standby list and reloads.
 	mockQueryService.AddQueryPatternOnce("ALTER SYSTEM RESET synchronous_standby_names",
 		mock.MakeQueryResult(nil, nil))
 	expectReloadConfig(mockQueryService)
 
-	// 5. setPrimaryConnInfoLocked(false, false): rewrite primary_conninfo + reload.
+	// setPrimaryConnInfoLocked(false, false): rewrite primary_conninfo + reload.
 	var capturedConnInfoSQL string
 	mockQueryService.AddQueryPatternWithCallback(
 		"ALTER SYSTEM SET primary_conninfo",
@@ -296,7 +293,7 @@ func TestSetTermPrimary_StalePrimaryDemotes(t *testing.T) {
 	)
 	expectReloadConfig(mockQueryService)
 
-	// 6. getStandbyReplayLSN — best-effort LSN read after demote.
+	// getStandbyReplayLSN — best-effort LSN read after demote.
 	mockQueryService.AddQueryPattern("SELECT pg_last_wal_replay_lsn",
 		mock.MakeQueryResult([]string{"pg_last_wal_replay_lsn"}, [][]any{{"0/2000"}}))
 
@@ -344,6 +341,50 @@ func TestSetTermPrimary_StalePrimaryDemotes(t *testing.T) {
 	require.NotNil(t, healthState.LeaderObservation)
 	assert.Equal(t, "new-primary", healthState.LeaderObservation.LeaderID.Name)
 	assert.Equal(t, int64(10), healthState.LeaderObservation.LeaderTerm)
+}
+
+func TestSetTermPrimary_KnownPrimaryDemotesWhenPositionUnavailable(t *testing.T) {
+	mockQueryService := mock.NewQueryService()
+
+	// After restart, every pg_is_in_recovery check should report standby.
+	mockQueryService.AddQueryPattern("SELECT pg_is_in_recovery",
+		mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"t"}}))
+
+	// waitForDatabaseConnection polls SELECT 1 after the standby restart.
+	mockQueryService.AddQueryPattern("^SELECT 1$", mock.MakeQueryResult(nil, nil))
+
+	// resetSynchronousReplication clears sync standby list and reloads.
+	mockQueryService.AddQueryPatternOnce("ALTER SYSTEM RESET synchronous_standby_names",
+		mock.MakeQueryResult(nil, nil))
+	expectReloadConfig(mockQueryService)
+
+	var capturedConnInfoSQL string
+	mockQueryService.AddQueryPatternWithCallback(
+		"ALTER SYSTEM SET primary_conninfo",
+		mock.MakeQueryResult(nil, nil),
+		func(sql string) { capturedConnInfoSQL = sql },
+	)
+	expectReloadConfig(mockQueryService)
+
+	mockQueryService.AddQueryPattern("SELECT pg_last_wal_replay_lsn",
+		mock.MakeQueryResult([]string{"pg_last_wal_replay_lsn"}, [][]any{{"0/2000"}}))
+
+	pm, _ := setupManagerWithMockDB(t, mockQueryService, &fakeRuleStore{
+		pos:        makeRulePosition(3),
+		observeErr: errors.New("manager is closed"),
+	})
+	leader := newLeaderAddress("new-primary", "primary-host", 5432)
+	req := &consensusdatapb.SetTermPrimaryRequest{
+		Leader: leader,
+		Rule:   ruleAtTermForLeader(leader, 10),
+	}
+	resp, err := pm.SetTermPrimary(t.Context(), req)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.NotNil(t, resp.ConsensusStatus)
+
+	assert.Contains(t, capturedConnInfoSQL, "host=primary-host")
+	assert.Equal(t, clustermetadatapb.PoolerType_REPLICA, pm.getPoolerType())
 }
 
 // TestSetTermPrimary_IgnoresRevokedRule verifies that when the incoming rule is
@@ -479,18 +520,21 @@ func TestSetTermPrimary_ApplyPathErrors(t *testing.T) {
 		// setupMocks runs after the default fakeRuleStore (if used) but before
 		// the SetTermPrimary call, to inject postgres-query failures.
 		setupMocks     func(*mock.QueryService)
+		setupManager   func(*MultiPoolerManager)
 		expectErrMatch string
 	}{
 		{
 			// observePosition fails: SetTermPrimary cannot decide whether the
 			// incoming rule is higher than the recorded one. Caller learns about
-			// the failure rather than silently dropping the SetTermPrimary.
+			// the failure rather than silently dropping the SetTermPrimary when
+			// the node is not already marked for rewind.
 			name: "ObservePositionFails",
 			ruleStore: &fakeRuleStore{
 				pos:        makeRulePosition(3),
 				observeErr: errors.New("rule store offline"),
 			},
 			setupMocks:     func(_ *mock.QueryService) {},
+			setupManager:   func(pm *MultiPoolerManager) { pm.multipooler.Type = clustermetadatapb.PoolerType_REPLICA },
 			expectErrMatch: "failed to observe local position",
 		},
 		{
@@ -502,6 +546,7 @@ func TestSetTermPrimary_ApplyPathErrors(t *testing.T) {
 				m.AddQueryPatternOnceWithError("SELECT pg_is_in_recovery",
 					errors.New("postgres unreachable"))
 			},
+			setupManager:   func(pm *MultiPoolerManager) { pm.multipooler.Type = clustermetadatapb.PoolerType_REPLICA },
 			expectErrMatch: "failed to check recovery status",
 		},
 		{
@@ -525,6 +570,7 @@ func TestSetTermPrimary_ApplyPathErrors(t *testing.T) {
 				m.AddQueryPatternOnceWithError("ALTER SYSTEM SET primary_conninfo",
 					errors.New("disk full"))
 			},
+			setupManager:   func(pm *MultiPoolerManager) { pm.multipooler.Type = clustermetadatapb.PoolerType_REPLICA },
 			expectErrMatch: "disk full",
 		},
 	}
@@ -534,6 +580,9 @@ func TestSetTermPrimary_ApplyPathErrors(t *testing.T) {
 			mockQueryService := mock.NewQueryService()
 			tt.setupMocks(mockQueryService)
 			pm, _ := setupManagerWithMockDB(t, mockQueryService, tt.ruleStore)
+			if tt.setupManager != nil {
+				tt.setupManager(pm)
+			}
 
 			leader := newLeaderAddress("new-primary", "primary-host", 5432)
 			req := &consensusdatapb.SetTermPrimaryRequest{

@@ -83,6 +83,7 @@ type SetupConfig struct {
 	EnableVpidStamping                 bool     // Pass --vpid-stamp-enabled=true to every multipooler (needed by the pgregress isolation harness shim)
 	PgInitdbArgs                       string   // Extra args forwarded to pgctld --pg-initdb-args (e.g., "--no-locale --encoding=SQL_ASCII" for pgregress)
 	PgInitdbExtraConfFiles             []string // postgresql.conf snippets appended at init time via --pg-initdb-extra-conf (e.g., locale overrides for pgregress)
+	UseNewConsensusFlow                bool     // Pass --use-new-consensus-flow to every multiorch.
 }
 
 // SetupOption is a function that configures setup creation.
@@ -123,6 +124,14 @@ func WithCellName(cell string) SetupOption {
 func WithDurabilityPolicy(policy string) SetupOption {
 	return func(c *SetupConfig) {
 		c.DurabilityPolicy = policy
+	}
+}
+
+// WithUseNewConsensusFlow enables the Recruit/Propose/SetTermPrimary consensus flow
+// for multiorch instances.
+func WithUseNewConsensusFlow() SetupOption {
+	return func(c *SetupConfig) {
+		c.UseNewConsensusFlow = true
 	}
 }
 

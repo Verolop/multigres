@@ -64,6 +64,29 @@ func TestParseUserSpecifiedDurabilityPolicy(t *testing.T) {
 	})
 }
 
+func TestCheckInitialCohortHeadroom(t *testing.T) {
+	a := id("a", "zone1")
+	b := id("b", "zone1")
+	c := id("c", "zone2")
+
+	t.Run("requires one spare beyond AT_LEAST_N", func(t *testing.T) {
+		err := CheckInitialCohortHeadroom(topoclient.AtLeastN(2), []*clustermetadatapb.ID{a, b})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "initial cohort requires at least one spare pooler")
+	})
+
+	t.Run("accepts AT_LEAST_N with spare", func(t *testing.T) {
+		err := CheckInitialCohortHeadroom(topoclient.AtLeastN(2), []*clustermetadatapb.ID{a, b, c})
+		require.NoError(t, err)
+	})
+
+	t.Run("still enforces policy achievability", func(t *testing.T) {
+		err := CheckInitialCohortHeadroom(topoclient.MultiCellAtLeastN(2), []*clustermetadatapb.ID{a, b})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "durability not achievable")
+	})
+}
+
 func TestNewPolicyWithCohort(t *testing.T) {
 	a := id("a", "zone1")
 	b := id("b", "zone1")
