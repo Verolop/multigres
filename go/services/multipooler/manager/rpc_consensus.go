@@ -916,20 +916,30 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 
 	// Observe the freshest view of our rule. SetTermPrimary is the staleness gate,
 	// so we want authoritative state — not the cached snapshot. The exception is
-	// a pooler already known to need primary demotion: postgres may be stopped/
-	// closed as part of the prior emergency demotion, and the only recovery path
-	// is the stale-primary demotion branch below.
+	// a pooler already known to need primary demotion: the previous demotion may
+	// have closed manager-side query resources even though postgres has since
+	// restarted as a standby. Repair that connection path and retry before using
+	// cached state as the last-resort route into stale-primary repair.
 	selfPos, err := pm.rules.observePosition(ctx)
 	if err != nil {
 		if !needsDemoteRepair {
 			return nil, mterrors.Wrap(err, "failed to observe local position")
 		}
-		selfPos = pm.rules.cachedPosition()
-		pm.logger.InfoContext(ctx, "SetTermPrimary: proceeding with stale-primary repair despite unavailable local position",
+		pm.logger.InfoContext(ctx, "SetTermPrimary: local position unavailable for stale-primary repair; reopening connections",
 			"incoming_rule", rule.GetRuleNumber(),
 			"known_primary", knownPrimary,
 			"rewind_pending", needsRewind,
 			"error", err)
+		pm.reopenConnections(ctx)
+		selfPos, err = pm.rules.observePosition(ctx)
+		if err != nil {
+			selfPos = pm.rules.cachedPosition()
+			pm.logger.InfoContext(ctx, "SetTermPrimary: proceeding with stale-primary repair despite unavailable local position",
+				"incoming_rule", rule.GetRuleNumber(),
+				"known_primary", knownPrimary,
+				"rewind_pending", needsRewind,
+				"error", err)
+		}
 	}
 
 	// Compare by RuleNumber only — LSN is intentionally not part of the gate.

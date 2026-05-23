@@ -100,6 +100,8 @@ type fakeRuleStore struct {
 	pos                *clustermetadatapb.PoolerPosition
 	posSequence        []*clustermetadatapb.PoolerPosition
 	observeErr         error
+	observeErrSequence []error
+	observeCount       int
 	updateErr          error
 	updateErrAfterHook error
 	updates            []*ruleUpdateBuilder
@@ -111,18 +113,24 @@ type fakeRuleStore struct {
 func (f *fakeRuleStore) observePosition(_ context.Context) (*clustermetadatapb.PoolerPosition, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.observeCount++
+	observeErr := f.observeErr
+	if len(f.observeErrSequence) > 0 {
+		observeErr = f.observeErrSequence[0]
+		f.observeErrSequence = f.observeErrSequence[1:]
+	}
 	if len(f.posSequence) > 0 {
 		pos := f.posSequence[0]
 		f.posSequence = f.posSequence[1:]
-		if pos == nil && f.observeErr == nil {
+		if pos == nil && observeErr == nil {
 			return nil, errors.New("fakeRuleStore: no position set")
 		}
-		return pos, f.observeErr
+		return pos, observeErr
 	}
-	if f.pos == nil && f.observeErr == nil {
+	if f.pos == nil && observeErr == nil {
 		return nil, errors.New("fakeRuleStore: no position set")
 	}
-	return f.pos, f.observeErr
+	return f.pos, observeErr
 }
 
 func (f *fakeRuleStore) createRuleTables(_ context.Context, _ *clustermetadatapb.DurabilityPolicy, _ *clustermetadatapb.ID) error {

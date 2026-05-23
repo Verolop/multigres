@@ -387,6 +387,40 @@ func TestSetTermPrimary_KnownPrimaryDemotesWhenPositionUnavailable(t *testing.T)
 	assert.Equal(t, clustermetadatapb.PoolerType_REPLICA, pm.getPoolerType())
 }
 
+func TestSetTermPrimary_ReopensConnectionsBeforeStalePrimaryRepair(t *testing.T) {
+	mockQueryService := mock.NewQueryService()
+
+	mockQueryService.AddQueryPattern("SELECT pg_is_in_recovery",
+		mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"t"}}))
+	mockQueryService.AddQueryPattern("^SELECT 1$", mock.MakeQueryResult(nil, nil))
+	mockQueryService.AddQueryPatternOnce("ALTER SYSTEM RESET synchronous_standby_names",
+		mock.MakeQueryResult(nil, nil))
+	expectReloadConfig(mockQueryService)
+	mockQueryService.AddQueryPattern("ALTER SYSTEM SET primary_conninfo",
+		mock.MakeQueryResult(nil, nil))
+	expectReloadConfig(mockQueryService)
+	mockQueryService.AddQueryPattern("SELECT pg_last_wal_replay_lsn",
+		mock.MakeQueryResult([]string{"pg_last_wal_replay_lsn"}, [][]any{{"0/2000"}}))
+
+	rules := &fakeRuleStore{pos: makeRulePosition(3)}
+	pm, _ := setupManagerWithMockDB(t, mockQueryService, rules)
+	rules.mu.Lock()
+	rules.observeCount = 0
+	rules.observeErrSequence = []error{errors.New("manager is closed"), nil}
+	rules.mu.Unlock()
+	leader := newLeaderAddress("new-primary", "primary-host", 5432)
+
+	resp, err := pm.SetTermPrimary(t.Context(), &consensusdatapb.SetTermPrimaryRequest{
+		Leader: leader,
+		Rule:   ruleAtTermForLeader(leader, 10),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	assert.GreaterOrEqual(t, rules.observeCount, 2)
+	assert.Equal(t, clustermetadatapb.PoolerType_REPLICA, pm.getPoolerType())
+}
+
 // TestSetTermPrimary_IgnoresRevokedRule verifies that when the incoming rule is
 // revoked by the pooler's recorded revocation (i.e. coordinator_term below
 // revoked_below_term and the outgoing-rule override does not fire), SetTermPrimary
