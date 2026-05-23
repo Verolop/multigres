@@ -141,9 +141,12 @@ func TestDiscovery_DatabaseLevelWatch(t *testing.T) {
 		Component: clustermetadata.ID_MULTIPOOLER, Cell: "zone1", Name: "pooler2",
 	}))
 
-	// Fourth watch event - removed pooler still in store (bookkeeping removes it later)
+	// Fourth watch event - removed pooler is pruned from the store immediately
+	// so later consensus cohorts do not include scaled-down poolers.
 	require.NoError(t, engine.poolerWatcher.Sync(ctx))
-	require.Equal(t, 4, engine.poolerStore.Len(), "store should still contain all poolers, bookkeeping handles removal")
+	require.Equal(t, 3, engine.poolerStore.Len(), "deleted pooler should be removed from store")
+	_, ok = engine.poolerStore.Get(poolerKey("zone1", "pooler2"))
+	require.False(t, ok, "pooler2 should be removed from store")
 }
 
 func TestDiscovery_TablegroupLevelWatch(t *testing.T) {

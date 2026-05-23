@@ -368,12 +368,17 @@ func (cw *cellPoolerWatcher) sync(ctx context.Context) error {
 // handlePoolerEvent processes a single watch event for a pooler file.
 func (cw *cellPoolerWatcher) handlePoolerEvent(wd *topoclient.WatchDataRecursive) {
 	if wd.Err != nil {
-		// Deletions (NoNode) are intentionally ignored here: the pooler store
-		// entry is left in place so that ongoing health checks can continue until
-		// bookkeeping removes it after the configured unseen threshold.
-		if !errors.Is(wd.Err, &topoclient.TopoError{Code: topoclient.NoNode}) {
-			cw.logger.Warn("watch error on pooler path", "error", wd.Err, "path", wd.Path)
+		if errors.Is(wd.Err, &topoclient.TopoError{Code: topoclient.NoNode}) {
+			poolerID := extractPoolerIDFromPath(wd.Path)
+			if poolerID != "" && cw.store.Delete(poolerID) {
+				cw.logger.Info("pooler removed from topology; deleted from pooler store",
+					"pooler_id", poolerID,
+					"path", wd.Path)
+			}
+			return
 		}
+
+		cw.logger.Warn("watch error on pooler path", "error", wd.Err, "path", wd.Path)
 		return
 	}
 
@@ -429,6 +434,25 @@ func (cw *cellPoolerWatcher) handlePoolerEvent(wd *topoclient.WatchDataRecursive
 			"type", pooler.Type.String(),
 		)
 	}
+}
+
+// extractPoolerIDFromPath extracts the pooler ID from a poolers/<id>/Pooler
+// watch path. It handles both relative memorytopo paths and absolute etcd paths.
+func extractPoolerIDFromPath(watchPath string) string {
+	parts := strings.Split(strings.Trim(watchPath, "/"), "/")
+	for i := range parts {
+		if parts[i] != topoclient.PoolersPath {
+			continue
+		}
+		if i+2 >= len(parts) || i+3 != len(parts) {
+			return ""
+		}
+		if parts[i+1] == "" || parts[i+2] != topoclient.PoolerFile {
+			return ""
+		}
+		return parts[i+1]
+	}
+	return ""
 }
 
 // matchesAnyTarget returns true if the pooler matches at least one of the
