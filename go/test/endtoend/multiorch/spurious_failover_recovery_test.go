@@ -16,6 +16,7 @@ package multiorch
 
 import (
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -32,6 +33,15 @@ import (
 )
 
 func TestSpuriousFailoverRecoveryWithSparePooler(t *testing.T) {
+	testSpuriousFailoverRecovery(t, 1)
+}
+
+func TestSpuriousFailoverRecoveryWithMultipleOrchs(t *testing.T) {
+	testSpuriousFailoverRecovery(t, 3)
+}
+
+func testSpuriousFailoverRecovery(t *testing.T, multiOrchCount int) {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping spurious failover recovery test in short mode")
 	}
@@ -41,7 +51,7 @@ func TestSpuriousFailoverRecoveryWithSparePooler(t *testing.T) {
 
 	setup, cleanup := shardsetup.NewIsolated(t,
 		shardsetup.WithMultipoolerCount(3),
-		shardsetup.WithMultiOrchCount(1),
+		shardsetup.WithMultiOrchCount(multiOrchCount),
 		shardsetup.WithDatabase("postgres"),
 		shardsetup.WithCellName("test-cell"),
 		shardsetup.WithDurabilityPolicy("AT_LEAST_2"),
@@ -55,7 +65,13 @@ func TestSpuriousFailoverRecoveryWithSparePooler(t *testing.T) {
 	primaryName := waitForShardReady(t, setup, 2 /* expectedStandbyCount */, 60*time.Second)
 	t.Logf("Bootstrap complete; primary=%s", primaryName)
 
-	resumeRecovery := setup.DisableRecovery(t, "multiorch")
+	// Pause every coordinator while injecting the Recruit fanout so the test owns
+	// the failure shape. Resuming all of them exercises recovery with the same
+	// multi-orch coordinator population that exists in production-like setups.
+	var resumeRecovery []func()
+	for _, orchName := range sortedMultiOrchNames(setup) {
+		resumeRecovery = append(resumeRecovery, setup.DisableRecovery(t, orchName))
+	}
 
 	type poolerClient struct {
 		name      string
@@ -109,8 +125,20 @@ func TestSpuriousFailoverRecoveryWithSparePooler(t *testing.T) {
 		r := <-recruitCh
 		require.NoError(t, r.err, "Recruit on %s", r.name)
 	}
-	t.Logf("Recruit complete at term %d; handing recovery back to multiorch", revocation.GetRevokedBelowTerm())
+	t.Logf("Recruit complete at term %d; handing recovery back to %d multiorch instance(s)",
+		revocation.GetRevokedBelowTerm(), len(resumeRecovery))
 
-	resumeRecovery()
+	for _, resume := range resumeRecovery {
+		resume()
+	}
 	setup.RequireRecovery(t, "multiorch", 90*time.Second)
+}
+
+func sortedMultiOrchNames(setup *shardsetup.ShardSetup) []string {
+	names := make([]string, 0, len(setup.MultiOrchInstances))
+	for name := range setup.MultiOrchInstances {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
