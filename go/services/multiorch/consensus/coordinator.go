@@ -118,32 +118,21 @@ func (c *Coordinator) AppointLeader(ctx context.Context, shardID string, cohort 
 }
 
 // runFailover wires the new-flow failover callbacks for a coordinatorLedRuleChange
-// and runs it. Poolers that have signaled REQUESTING_DEMOTION are excluded from
-// the cohort entirely: a writing leader's local LSN is always at least as
-// advanced as any replica's (async replication), so including a resigned
-// leader would let it dominate discovery and dead-end the proposal when health
-// check rejects it. The full cohort identity is preserved via OutgoingRule's
-// CohortMembers (replicas carry the same rule), so the consensus layer's
-// outgoing-quorum check still runs against the original cohort size.
+// and runs it. Keep resigned poolers in the recruitment cohort: a primary can
+// resign because it accepted a coordinator revocation, not because it is
+// unreachable or unsafe to re-promote. Removing it before recruitment can make a
+// two-survivor AZ-loss case fail outgoing quorum even though the resigned pooler
+// is reachable and has the most advanced WAL.
 func (c *Coordinator) runFailover(ctx context.Context, cohort []*multiorchdatapb.PoolerHealthState, reason string) error {
-	liveCohort := make([]*multiorchdatapb.PoolerHealthState, 0, len(cohort))
-	for _, p := range cohort {
-		if types.LeaderNeedsReplacement(p) {
-			c.logger.InfoContext(ctx, "Excluding resigned pooler from failover cohort",
-				"pooler", p.GetMultiPooler().GetId().GetName())
-			continue
-		}
-		liveCohort = append(liveCohort, p)
-	}
-	if len(liveCohort) == 0 {
+	if len(cohort) == 0 {
 		return mterrors.Errorf(mtrpcpb.Code_UNAVAILABLE,
-			"no non-resigned poolers in cohort; cannot fail over")
+			"no poolers in cohort; cannot fail over")
 	}
 
 	// Failover constructs the revocation via NewTermRevocation: outgoing_rule
 	// is the highest RuleNumber discovered across cohort statuses.
 	var liveStatuses []*clustermetadatapb.ConsensusStatus
-	for _, p := range liveCohort {
+	for _, p := range cohort {
 		if cs := p.GetConsensusStatus(); cs != nil {
 			liveStatuses = append(liveStatuses, cs)
 		}
@@ -153,7 +142,7 @@ func (c *Coordinator) runFailover(ctx context.Context, cohort []*multiorchdatapb
 		return mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "%v", err)
 	}
 
-	poolerByID, _ := buildCohortMaps(liveCohort)
+	poolerByID, _ := buildCohortMaps(cohort)
 	buildProposal := func(r commonconsensus.RecruitmentResult) (*consensusdatapb.CoordinatorProposal, error) {
 		return buildFailoverProposal(r, poolerByID)
 	}
@@ -163,7 +152,7 @@ func (c *Coordinator) runFailover(ctx context.Context, cohort []*multiorchdatapb
 	checkProposalPossible := func(rev *clustermetadatapb.TermRevocation, statuses []*clustermetadatapb.ConsensusStatus) error {
 		return commonconsensus.CheckProposalPossible(rev, statuses, buildProposal)
 	}
-	return c.newRuleChange(reason, tryBuildProposal, checkProposalPossible).Run(ctx, liveCohort, revocation)
+	return c.newRuleChange(reason, tryBuildProposal, checkProposalPossible).Run(ctx, cohort, revocation)
 }
 
 // appointLeaderWithTerm is the shared core of AppointLeader and AppointInitialLeader.
@@ -178,7 +167,7 @@ func (c *Coordinator) appointLeaderWithTerm(ctx context.Context, shardID string,
 		return mterrors.Wrap(err, "failed to parse durability policy")
 	}
 
-	// Drop poolers that have self-revoked via REQUESTING_DEMOTION. Their
+	// The legacy BeginTerm flow still drops poolers that have self-revoked via REQUESTING_DEMOTION. Their
 	// BeginTerm RPC would block on the action lock held by their own
 	// graceful-shutdown sequence (e.g. while pgctld.Stop runs), and the
 	// legacy recruit fan-out waits for every goroutine — so a single

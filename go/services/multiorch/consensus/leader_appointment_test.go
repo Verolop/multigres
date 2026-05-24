@@ -1712,6 +1712,82 @@ func TestAppointLeader_NewFlow(t *testing.T) {
 	}
 }
 
+func TestAppointLeader_NewFlow_RecruitsReachableResignedPrimary(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	coordID := &clustermetadatapb.ID{
+		Component: clustermetadatapb.ID_MULTIORCH,
+		Cell:      "test-cell",
+		Name:      "test-coordinator",
+	}
+
+	fakeClient := rpcclient.NewFakeClient()
+	ts, _ := memorytopo.NewServerAndFactory(ctx, "zone1")
+	defer ts.Close()
+
+	c := NewCoordinator(coordID, ts, fakeClient, logger, true /* useNewFlow */)
+
+	cohortIDs := []*clustermetadatapb.ID{
+		{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "mp1"},
+		{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "mp2"},
+		{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "mp3"},
+	}
+	outgoingRule := &clustermetadatapb.ShardRule{
+		RuleNumber:       &clustermetadatapb.RuleNumber{CoordinatorTerm: 6},
+		LeaderId:         cohortIDs[0],
+		CohortMembers:    cohortIDs,
+		DurabilityPolicy: topoclient.AtLeastN(2),
+	}
+
+	walPositions := []string{"0/5000000", "0/4000000", "0/3000000"}
+	cohort := make([]*multiorchdatapb.PoolerHealthState, 0, len(cohortIDs))
+	for i, id := range cohortIDs {
+		mp := createMockNode(fakeClient, id.Name, 6, walPositions[i], true, outgoingRule)
+		mp.ConsensusStatus.Id = id
+		mp.ConsensusStatus.CurrentPosition = &clustermetadatapb.PoolerPosition{
+			Lsn:  walPositions[i],
+			Rule: outgoingRule,
+		}
+		key := topoclient.MultiPoolerIDString(id)
+		fakeClient.RecruitResponses[key] = &consensusdatapb.RecruitResponse{
+			ConsensusStatus: &clustermetadatapb.ConsensusStatus{
+				Id: id,
+				CurrentPosition: &clustermetadatapb.PoolerPosition{
+					Lsn:  walPositions[i],
+					Rule: outgoingRule,
+				},
+			},
+		}
+		require.NoError(t, ts.CreateMultiPooler(ctx, mp.MultiPooler))
+		cohort = append(cohort, mp)
+	}
+
+	// mp1 was the freshly promoted primary, then accepted a later Recruit and
+	// signalled REQUESTING_DEMOTION. It is still reachable and has the most
+	// advanced WAL. mp3 is unavailable, so excluding mp1 would leave only one
+	// recruited outgoing cohort member under AT_LEAST_2 and wedge recovery.
+	cohort[0].AvailabilityStatus = &clustermetadatapb.AvailabilityStatus{
+		LeadershipStatus: &clustermetadatapb.LeadershipStatus{
+			LeaderTerm: 6,
+			Signal:     clustermetadatapb.LeadershipSignal_LEADERSHIP_SIGNAL_REQUESTING_DEMOTION,
+		},
+	}
+	mp3Key := topoclient.MultiPoolerIDString(cohortIDs[2])
+	fakeClient.Errors[mp3Key] = errors.New("unavailable")
+
+	require.NoError(t, c.AppointLeader(ctx, "shard0", cohort, "testdb", "az_loss_resigned_primary"))
+
+	mp1Key := topoclient.MultiPoolerIDString(cohortIDs[0])
+	propReq, ok := fakeClient.ProposeRequests[mp1Key]
+	require.True(t, ok, "reachable resigned primary should be eligible for re-promotion")
+	require.Equal(t, "mp1", propReq.GetProposal().GetProposalLeader().GetId().GetName())
+	require.Equal(t, int64(7), propReq.GetProposal().GetProposedRule().GetRuleNumber().GetCoordinatorTerm())
+
+	mp2Key := topoclient.MultiPoolerIDString(cohortIDs[1])
+	_, ok = fakeClient.SetTermPrimaryRequests[mp2Key]
+	require.True(t, ok, "the other recruited survivor should be pointed at the re-promoted leader")
+}
+
 func TestAppointInitialLeader(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn}))

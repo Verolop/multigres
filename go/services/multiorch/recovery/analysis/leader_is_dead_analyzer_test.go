@@ -99,7 +99,23 @@ func TestLeaderIsDeadAnalyzer_Analyze(t *testing.T) {
 		require.Empty(t, problems)
 	})
 
-	t.Run("ignores when no leader exists in topology (future analysis)", func(t *testing.T) {
+	t.Run("detects initialized shard with cohort but no known leader", func(t *testing.T) {
+		sa := deadLeaderShardAnalysis(func(sa *ShardAnalysis) {
+			sa.HighestTermDiscoveredLeaderID = nil
+			cohortMember := &clustermetadatapb.ID{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "follower-1"}
+			sa.Analyses[0].CohortMembers = []*clustermetadatapb.ID{cohortMember}
+		})
+
+		problems, err := analyzer.Analyze(sa)
+		require.NoError(t, err)
+		require.Len(t, problems, 1)
+		require.Equal(t, types.ProblemLeaderIsDead, problems[0].Code)
+		require.Equal(t, types.ScopeShard, problems[0].Scope)
+		require.Nil(t, problems[0].PoolerID)
+		require.NotNil(t, problems[0].RecoveryAction)
+	})
+
+	t.Run("ignores no known leader before cohort exists", func(t *testing.T) {
 		sa := deadLeaderShardAnalysis(func(sa *ShardAnalysis) {
 			sa.HighestTermDiscoveredLeaderID = nil
 		})

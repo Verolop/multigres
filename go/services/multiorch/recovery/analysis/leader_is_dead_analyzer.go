@@ -47,19 +47,30 @@ func (a *LeaderIsDeadAnalyzer) Analyze(sa *ShardAnalysis) ([]types.Problem, erro
 		return nil, errors.New("recovery action factory not initialized")
 	}
 
-	// No leader known — nothing to declare dead.
 	if sa.HighestTermDiscoveredLeaderID == nil {
+		// Bootstrap handles empty-cohort shards. Once a cohort exists, a missing
+		// leader means an initialized shard needs a new appointment.
+		if !sa.HasInitializedReplica || !hasEstablishedCohort(sa) {
+			return nil, nil
+		}
+		return []types.Problem{{
+			Code:           types.ProblemLeaderIsDead,
+			CheckName:      "LeaderIsDead",
+			ShardKey:       sa.ShardKey,
+			Description:    fmt.Sprintf("Initialized shard %s has no known leader", sa.ShardKey),
+			Priority:       types.PriorityEmergency,
+			Scope:          types.ScopeShard,
+			DetectedAt:     time.Now(),
+			RecoveryAction: a.factory.NewAppointLeaderAction(),
+		}}, nil
+	}
+
+	if !sa.HasInitializedReplica {
 		return nil, nil
 	}
 
 	// Leader is fully reachable — no problem.
 	if sa.LeaderReachable {
-		return nil, nil
-	}
-
-	// No initialized replica to confirm the leader is dead — skip to avoid false positives
-	// when the shard has no postgres standby that has joined the cluster yet.
-	if !sa.HasInitializedReplica {
 		return nil, nil
 	}
 
@@ -159,4 +170,13 @@ func (a *LeaderIsDeadAnalyzer) Analyze(sa *ShardAnalysis) ([]types.Problem, erro
 		DetectedAt:     time.Now(),
 		RecoveryAction: a.factory.NewAppointLeaderAction(),
 	}}, nil
+}
+
+func hasEstablishedCohort(sa *ShardAnalysis) bool {
+	for _, pa := range sa.Analyses {
+		if len(pa.CohortMembers) > 0 {
+			return true
+		}
+	}
+	return false
 }

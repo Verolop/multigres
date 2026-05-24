@@ -592,6 +592,14 @@ func (pm *MultiPoolerManager) Recruit(ctx context.Context, req *consensusdatapb.
 		}
 		return nil, raceErr
 	}
+	if isPrimary {
+		// Recruit is a coordinator-driven handoff: we drained writes, captured a
+		// stable WAL position, restarted as standby, and persisted the revocation.
+		// That is different from an unknown emergency demotion. Leaving
+		// rewindPending set here makes the next recovery round unable to recruit
+		// this reachable pooler, which can strand a 2-of-3 cohort after AZ loss.
+		pm.rewindPending.Store(false)
+	}
 
 	eventlog.Emit(ctx, pm.logger, eventlog.Success, termEvent)
 	pm.logger.InfoContext(ctx, "Recruit complete", "revoked_below_term", revokedBelowTerm)
@@ -918,8 +926,8 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 
 	// Observe the freshest view of our rule. SetTermPrimary is the staleness gate,
 	// so we want authoritative state — not the cached snapshot. The exception is
-	// the failure mode seen during EKS testing: manager-side query resources can be
-	// closed after demotion even though postgres has since restarted as a standby.
+	// the stale-primary recovery case: manager-side query resources can be closed
+	// after demotion even though postgres has since restarted as a standby.
 	// Repair that connection path and retry. Other observePosition errors remain
 	// real errors, and if the retry still cannot read authoritative state, stop
 	// here rather than making a consensus-affecting change from cached position.

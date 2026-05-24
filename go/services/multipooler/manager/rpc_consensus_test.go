@@ -1534,6 +1534,44 @@ func TestRecruit(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "rewind pending")
 	})
+
+	t.Run("PrimaryRecruit_ClearsRewindPendingAfterAcceptedRevocation", func(t *testing.T) {
+		mockQueryService := mock.NewQueryService()
+		// Recruit observes primary before demotion, then verifies standby after
+		// restartPostgresAsStandby.
+		mockQueryService.AddQueryPatternOnce("SELECT pg_is_in_recovery",
+			mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"f"}}))
+		mockQueryService.AddQueryPatternOnce("SELECT pg_is_in_recovery",
+			mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"f"}}))
+		mockQueryService.AddQueryPatternOnce("SELECT pg_is_in_recovery",
+			mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"f"}}))
+		mockQueryService.AddQueryPatternOnce("SELECT pg_is_in_recovery",
+			mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"f"}}))
+		mockQueryService.AddQueryPattern("SELECT pg_is_in_recovery",
+			mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"t"}}))
+		mockQueryService.AddQueryPattern("SELECT pg_current_wal_lsn",
+			mock.MakeQueryResult([]string{"pg_current_wal_lsn"}, [][]any{{"0/8000000"}}))
+		mockQueryService.AddQueryPattern("SELECT pid",
+			mock.MakeQueryResult([]string{"pid"}, nil))
+		mockQueryService.AddQueryPattern("SELECT 1", mock.MakeQueryResult(nil, nil))
+
+		pm, _ := setupManagerWithMockDB(t, mockQueryService, &fakeRuleStore{pos: makeRulePosition(0)})
+		pm.rewindPending.Store(false)
+
+		req := &consensusdatapb.RecruitRequest{
+			TermRevocation: &clustermetadatapb.TermRevocation{
+				RevokedBelowTerm:       8,
+				AcceptedCoordinatorId:  &clustermetadatapb.ID{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "coord"},
+				CoordinatorInitiatedAt: recruitTS,
+				OutgoingRule:           &clustermetadatapb.RuleNumber{},
+			},
+		}
+
+		resp, err := pm.Recruit(t.Context(), req)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.False(t, pm.rewindPending.Load(), "accepted primary Recruit should not leave the demoted standby unrecruitable")
+	})
 }
 
 // expectStandbyReadyMocks adds the mock responses for the standby-state
