@@ -39,6 +39,11 @@ const (
 	initialUserPoolCapacity int64 = 10
 )
 
+// ErrManagerClosed is returned when a caller tries to acquire a pool from a
+// closed manager. Callers that can repair the manager lifecycle should use
+// errors.Is rather than string matching.
+var ErrManagerClosed = errors.New("manager is closed")
+
 // Manager orchestrates per-user connection pools with a shared admin pool.
 // Each user gets their own RegularPool and ReservedPool that connect directly
 // as that user via trust/peer authentication.
@@ -282,7 +287,7 @@ func (m *Manager) getOrCreateUserPool(user string, clientKey, serverKey []byte) 
 
 	// Check if closed before attempting to create
 	if m.closed.Load() {
-		return nil, errors.New("manager is closed")
+		return nil, ErrManagerClosed
 	}
 
 	// Cold path: need to create a new user pool.
@@ -307,7 +312,7 @@ func (m *Manager) createUserPoolSlow(ctx context.Context, user string, clientKey
 
 	// Check if closed (with lock held)
 	if m.closed.Load() {
-		return nil, errors.New("manager is closed")
+		return nil, ErrManagerClosed
 	}
 
 	currentPools := *pools

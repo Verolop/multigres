@@ -16,8 +16,8 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -30,6 +30,7 @@ import (
 	consensusdatapb "github.com/multigres/multigres/go/pb/consensusdata"
 	mtrpcpb "github.com/multigres/multigres/go/pb/mtrpc"
 	multipoolermanagerdatapb "github.com/multigres/multigres/go/pb/multipoolermanagerdata"
+	"github.com/multigres/multigres/go/services/multipooler/connpoolmanager"
 	"github.com/multigres/multigres/go/services/multipooler/poolerserver"
 )
 
@@ -1030,18 +1031,13 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 
 	cs, err := pm.getConsensusStatus(ctx)
 	if err != nil {
-		pm.logger.WarnContext(ctx, "Failed to build fresh consensus status after SetTermPrimary; falling back to cached status",
-			"error", err)
-		cs, err = pm.getInconsistentConsensusStatus(ctx)
-		if err != nil {
-			return nil, mterrors.Wrap(err, "failed to build consensus status after SetTermPrimary")
-		}
+		return nil, mterrors.Wrap(err, "failed to build consensus status after SetTermPrimary")
 	}
 	return &consensusdatapb.SetTermPrimaryResponse{ConsensusStatus: cs}, nil
 }
 
 func isManagerClosedError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "manager is closed")
+	return errors.Is(err, connpoolmanager.ErrManagerClosed)
 }
 
 // ConsensusStatus returns the current status of this node for consensus

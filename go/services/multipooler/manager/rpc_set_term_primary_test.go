@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/multigres/multigres/go/services/multipooler/connpoolmanager"
 	"github.com/multigres/multigres/go/services/multipooler/executor/mock"
 
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
@@ -347,7 +348,7 @@ func TestSetTermPrimary_StalePrimaryDemotes(t *testing.T) {
 	assert.Equal(t, int64(10), healthState.LeaderObservation.LeaderTerm)
 }
 
-func TestSetTermPrimary_KnownPrimaryDemotesWhenPositionUnavailable(t *testing.T) {
+func TestSetTermPrimary_KnownPrimaryDemotesButSurfacesStatusFailure(t *testing.T) {
 	mockQueryService := mock.NewQueryService()
 
 	// After restart, every pg_is_in_recovery check should report standby.
@@ -375,7 +376,7 @@ func TestSetTermPrimary_KnownPrimaryDemotesWhenPositionUnavailable(t *testing.T)
 
 	pm, _ := setupManagerWithMockDB(t, mockQueryService, &fakeRuleStore{
 		pos:        makeRulePosition(3),
-		observeErr: errors.New("manager is closed"),
+		observeErr: connpoolmanager.ErrManagerClosed,
 	})
 	leader := newLeaderAddress("new-primary", "primary-host", 5432)
 	req := &consensusdatapb.SetTermPrimaryRequest{
@@ -383,10 +384,12 @@ func TestSetTermPrimary_KnownPrimaryDemotesWhenPositionUnavailable(t *testing.T)
 		Rule:   ruleAtTermForLeader(leader, 10),
 	}
 	resp, err := pm.SetTermPrimary(t.Context(), req)
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-	require.NotNil(t, resp.ConsensusStatus)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to build consensus status after SetTermPrimary")
+	assert.Nil(t, resp)
 
+	// The stale-primary repair still happened, but the final status read failed.
+	// Surface that failure to the coordinator instead of returning cached state.
 	assert.Contains(t, capturedConnInfoSQL, "host=primary-host")
 	assert.Equal(t, clustermetadatapb.PoolerType_REPLICA, pm.getPoolerType())
 }
@@ -435,7 +438,7 @@ func TestSetTermPrimary_ReopensConnectionsBeforeStalePrimaryRepair(t *testing.T)
 	pm, _ := setupManagerWithMockDB(t, mockQueryService, rules)
 	rules.mu.Lock()
 	rules.observeCount = 0
-	rules.observeErrSequence = []error{errors.New("manager is closed"), nil}
+	rules.observeErrSequence = []error{connpoolmanager.ErrManagerClosed, nil}
 	rules.mu.Unlock()
 	leader := newLeaderAddress("new-primary", "primary-host", 5432)
 

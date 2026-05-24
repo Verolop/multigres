@@ -369,6 +369,10 @@ func (cw *cellPoolerWatcher) sync(ctx context.Context) error {
 func (cw *cellPoolerWatcher) handlePoolerEvent(wd *topoclient.WatchDataRecursive) {
 	if wd.Err != nil {
 		if errors.Is(wd.Err, &topoclient.TopoError{Code: topoclient.NoNode}) {
+			// A NoNode for the exact pooler metadata file means topology has
+			// already removed this pod from the shard. Drop it from the recovery
+			// store immediately so scale-down cannot leave a stale PRIMARY or
+			// cohort member behind. Other NoNode shapes are ignored below.
 			poolerID := extractPoolerIDFromPath(wd.Path)
 			if poolerID != "" && cw.store.Delete(poolerID) {
 				cw.logger.Info("pooler removed from topology; deleted from pooler store",

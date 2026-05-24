@@ -193,6 +193,7 @@ func TestManager_GetRegularConn_ClosedManager(t *testing.T) {
 	// Closed manager should error.
 	_, err := manager.GetRegularConn(ctx, "testuser", nil, nil)
 	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrManagerClosed)
 	assert.Contains(t, err.Error(), "manager is closed")
 }
 
