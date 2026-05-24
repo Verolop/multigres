@@ -151,6 +151,11 @@ func runSingleUserPostgres(ctx context.Context) ([]byte, error) {
 // cluster still needs crash recovery before pg_rewind can proceed. The signal
 // files are restored before normal PostgreSQL startup; this helper only creates
 // the window needed for postgres --single to replay crash recovery records.
+//
+// This is deliberately a narrow filesystem transition around postgres --single,
+// not a substitute for normal standby startup semantics. Unit tests cover the
+// signal-file choreography, including failure paths, but they do not prove
+// end-to-end PostgreSQL standby restart behavior.
 func withRecoverySignalsDisabled(dataDir string, logger *slog.Logger, fn func() error) error {
 	restores := make([]func() error, 0, 2)
 	for _, name := range []string{"standby.signal", "recovery.signal"} {
