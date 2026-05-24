@@ -1852,7 +1852,7 @@ func TestAppointInitialLeader(t *testing.T) {
 
 		err := c.AppointInitialLeader(ctx, "shard0", cohort, "testdb")
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "initial cohort requires at least one spare pooler")
+		require.Contains(t, err.Error(), "initial cohort requires one-failure headroom")
 	})
 }
 

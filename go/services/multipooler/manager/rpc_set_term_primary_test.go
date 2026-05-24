@@ -348,7 +348,7 @@ func TestSetTermPrimary_StalePrimaryDemotes(t *testing.T) {
 	assert.Equal(t, int64(10), healthState.LeaderObservation.LeaderTerm)
 }
 
-func TestSetTermPrimary_KnownPrimaryDemotesButSurfacesStatusFailure(t *testing.T) {
+func TestSetTermPrimary_KnownPrimaryDoesNotDemoteWithoutFreshPosition(t *testing.T) {
 	mockQueryService := mock.NewQueryService()
 
 	// After restart, every pg_is_in_recovery check should report standby.
@@ -385,13 +385,13 @@ func TestSetTermPrimary_KnownPrimaryDemotesButSurfacesStatusFailure(t *testing.T
 	}
 	resp, err := pm.SetTermPrimary(t.Context(), req)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to build consensus status after SetTermPrimary")
+	assert.Contains(t, err.Error(), "failed to observe local position after reopening connections")
 	assert.Nil(t, resp)
 
-	// The stale-primary repair still happened, but the final status read failed.
-	// Surface that failure to the coordinator instead of returning cached state.
-	assert.Contains(t, capturedConnInfoSQL, "host=primary-host")
-	assert.Equal(t, clustermetadatapb.PoolerType_REPLICA, pm.getPoolerType())
+	// Do not make a consensus-affecting demotion from cached state when the
+	// authoritative position remains unreadable.
+	assert.Empty(t, capturedConnInfoSQL)
+	assert.Equal(t, clustermetadatapb.PoolerType_PRIMARY, pm.getPoolerType())
 }
 
 func TestSetTermPrimary_KnownPrimaryObserveFailureDoesNotDemoteForUnrelatedError(t *testing.T) {

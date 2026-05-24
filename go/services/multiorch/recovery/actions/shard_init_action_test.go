@@ -266,7 +266,7 @@ func TestShardInitAction_Execute_InsufficientInitialCohortHeadroom(t *testing.T)
 
 	err := action.Execute(t.Context(), types.Problem{ShardKey: testShardInitShardKey})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "initial cohort requires at least one spare pooler")
+	assert.Contains(t, err.Error(), "initial cohort requires one-failure headroom")
 	assert.Empty(t, coord.appointedCohort)
 }
 
