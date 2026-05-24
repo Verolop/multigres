@@ -148,12 +148,17 @@ func runSingleUserPostgres(ctx context.Context) ([]byte, error) {
 // withRecoverySignalsDisabled hides standby/recovery signal files while running
 // single-user crash recovery. Single-user postgres refuses to start in standby
 // mode, but a failed standby restart can leave standby.signal behind while the
-// cluster still needs crash recovery before pg_rewind can proceed.
+// cluster still needs crash recovery before pg_rewind can proceed. The signal
+// files are restored before normal PostgreSQL startup; this helper only creates
+// the window needed for postgres --single to replay crash recovery records.
 func withRecoverySignalsDisabled(dataDir string, logger *slog.Logger, fn func() error) error {
 	restores := make([]func() error, 0, 2)
 	for _, name := range []string{"standby.signal", "recovery.signal"} {
 		restore, err := moveSignalAside(dataDir, name, logger)
 		if err != nil {
+			if restoreErr := restoreRecoverySignals(restores); restoreErr != nil {
+				return errors.Join(err, restoreErr)
+			}
 			return err
 		}
 		if restore != nil {
@@ -162,7 +167,16 @@ func withRecoverySignalsDisabled(dataDir string, logger *slog.Logger, fn func() 
 	}
 
 	runErr := fn()
+	if restoreErr := restoreRecoverySignals(restores); restoreErr != nil {
+		if runErr != nil {
+			return errors.Join(runErr, restoreErr)
+		}
+		return restoreErr
+	}
+	return runErr
+}
 
+func restoreRecoverySignals(restores []func() error) error {
 	var restoreErrs []error
 	for i := len(restores) - 1; i >= 0; i-- {
 		if err := restores[i](); err != nil {
@@ -170,13 +184,9 @@ func withRecoverySignalsDisabled(dataDir string, logger *slog.Logger, fn func() 
 		}
 	}
 	if len(restoreErrs) > 0 {
-		restoreErr := errors.Join(restoreErrs...)
-		if runErr != nil {
-			return errors.Join(runErr, restoreErr)
-		}
-		return restoreErr
+		return errors.Join(restoreErrs...)
 	}
-	return runErr
+	return nil
 }
 
 func moveSignalAside(dataDir, name string, logger *slog.Logger) (func() error, error) {

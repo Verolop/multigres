@@ -223,3 +223,24 @@ func TestWithRecoverySignalsDisabledRestoresAfterError(t *testing.T) {
 	assert.FileExists(t, standbySignal)
 	assert.NoFileExists(t, standbySignal+".crash-recovery-disabled")
 }
+
+func TestWithRecoverySignalsDisabledRestoresAfterSetupError(t *testing.T) {
+	dataDir := t.TempDir()
+	standbySignal := filepath.Join(dataDir, "standby.signal")
+	recoverySignal := filepath.Join(dataDir, "recovery.signal")
+	disabledRecoverySignal := recoverySignal + ".crash-recovery-disabled"
+	require.NoError(t, os.WriteFile(standbySignal, nil, 0o644))
+	require.NoError(t, os.WriteFile(recoverySignal, nil, 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(disabledRecoverySignal, "not-empty"), 0o755))
+
+	err := withRecoverySignalsDisabled(dataDir, testLogger(), func() error {
+		require.Fail(t, "crash recovery callback must not run after setup failure")
+		return nil
+	})
+
+	require.Error(t, err)
+	assert.FileExists(t, standbySignal)
+	assert.NoFileExists(t, standbySignal+".crash-recovery-disabled")
+	assert.FileExists(t, recoverySignal)
+	assert.DirExists(t, disabledRecoverySignal)
+}
