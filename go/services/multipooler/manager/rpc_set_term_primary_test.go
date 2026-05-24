@@ -270,7 +270,11 @@ func TestSetTermPrimary_StandbyAppliesNewPrimary(t *testing.T) {
 func TestSetTermPrimary_StalePrimaryDemotes(t *testing.T) {
 	mockQueryService := mock.NewQueryService()
 
-	// After restart, every pg_is_in_recovery check must report standby.
+	// SetTermPrimary's routing check sees this pooler still acting as primary.
+	mockQueryService.AddQueryPatternOnce("SELECT pg_is_in_recovery",
+		mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"f"}}))
+
+	// After restart, every later pg_is_in_recovery check must report standby.
 	// Covers isInRecovery (verify after restart), resetSynchronousReplication's
 	// role check, and setPrimaryConnInfoLocked's guardrail.
 	mockQueryService.AddQueryPattern("SELECT pg_is_in_recovery",
@@ -387,11 +391,34 @@ func TestSetTermPrimary_KnownPrimaryDemotesWhenPositionUnavailable(t *testing.T)
 	assert.Equal(t, clustermetadatapb.PoolerType_REPLICA, pm.getPoolerType())
 }
 
+func TestSetTermPrimary_KnownPrimaryObserveFailureDoesNotDemoteForUnrelatedError(t *testing.T) {
+	mockQueryService := mock.NewQueryService()
+
+	pm, _ := setupManagerWithMockDB(t, mockQueryService, &fakeRuleStore{
+		pos:        makeRulePosition(3),
+		observeErr: errors.New("permission denied"),
+	})
+	pm.multipooler.Type = clustermetadatapb.PoolerType_PRIMARY
+
+	leader := newLeaderAddress("new-primary", "primary-host", 5432)
+	resp, err := pm.SetTermPrimary(t.Context(), &consensusdatapb.SetTermPrimaryRequest{
+		Leader: leader,
+		Rule:   ruleAtTermForLeader(leader, 10),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to observe local position")
+	assert.Nil(t, resp)
+	assert.Equal(t, clustermetadatapb.PoolerType_PRIMARY, pm.getPoolerType())
+	assert.NoError(t, mockQueryService.ExpectationsWereMet())
+}
+
 func TestSetTermPrimary_ReopensConnectionsBeforeStalePrimaryRepair(t *testing.T) {
 	mockQueryService := mock.NewQueryService()
 
 	mockQueryService.AddQueryPattern("SELECT pg_is_in_recovery",
 		mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"t"}}))
+	mockQueryService.AddQueryPatternOnce("SELECT pg_wal_replay_pause",
+		mock.MakeQueryResult(nil, nil))
 	mockQueryService.AddQueryPattern("^SELECT 1$", mock.MakeQueryResult(nil, nil))
 	mockQueryService.AddQueryPatternOnce("ALTER SYSTEM RESET synchronous_standby_names",
 		mock.MakeQueryResult(nil, nil))
@@ -400,7 +427,9 @@ func TestSetTermPrimary_ReopensConnectionsBeforeStalePrimaryRepair(t *testing.T)
 		mock.MakeQueryResult(nil, nil))
 	expectReloadConfig(mockQueryService)
 	mockQueryService.AddQueryPattern("SELECT pg_last_wal_replay_lsn",
-		mock.MakeQueryResult([]string{"pg_last_wal_replay_lsn"}, [][]any{{"0/2000"}}))
+		mock.MakeQueryResult([]string{"replay_lsn", "is_paused"}, [][]any{{"0/2000", true}}))
+	mockQueryService.AddQueryPatternOnce("SELECT pg_wal_replay_resume",
+		mock.MakeQueryResult(nil, nil))
 
 	rules := &fakeRuleStore{pos: makeRulePosition(3)}
 	pm, _ := setupManagerWithMockDB(t, mockQueryService, rules)

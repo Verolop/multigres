@@ -17,6 +17,7 @@ package consensus
 import (
 	"fmt"
 
+	"github.com/multigres/multigres/go/common/topoclient"
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
 )
 
@@ -33,10 +34,14 @@ func CheckInitialCohortHeadroom(policyProto *clustermetadatapb.DurabilityPolicy,
 		return err
 	}
 
-	required := int(policyProto.GetRequiredCount()) + 1
-	if len(proposedCohort) < required {
-		return fmt.Errorf("initial cohort requires at least one spare pooler: proposed cohort has %d poolers, required %d for %s",
-			len(proposedCohort), required, policy.Description())
+	for i, failed := range proposedCohort {
+		remaining := make([]*clustermetadatapb.ID, 0, len(proposedCohort)-1)
+		remaining = append(remaining, proposedCohort[:i]...)
+		remaining = append(remaining, proposedCohort[i+1:]...)
+		if err := policy.CheckAchievable(remaining); err != nil {
+			return fmt.Errorf("initial cohort requires one-failure headroom for %s: removing %s leaves %d poolers that cannot satisfy policy: %w",
+				policy.Description(), topoclient.ClusterIDString(failed), len(remaining), err)
+		}
 	}
 	return nil
 }

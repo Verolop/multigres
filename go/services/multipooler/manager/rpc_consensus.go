@@ -17,6 +17,7 @@ package manager
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -916,13 +917,14 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 
 	// Observe the freshest view of our rule. SetTermPrimary is the staleness gate,
 	// so we want authoritative state — not the cached snapshot. The exception is
-	// a pooler already known to need primary demotion: the previous demotion may
-	// have closed manager-side query resources even though postgres has since
-	// restarted as a standby. Repair that connection path and retry before using
-	// cached state as the last-resort route into stale-primary repair.
+	// the failure mode seen during EKS testing: manager-side query resources can be
+	// closed after demotion even though postgres has since restarted as a standby.
+	// Repair that connection path and retry. Only fall back to cached state for
+	// that closed-manager case; other observePosition errors remain real errors.
+	positionUnavailableForRepair := false
 	selfPos, err := pm.rules.observePosition(ctx)
 	if err != nil {
-		if !needsDemoteRepair {
+		if !needsDemoteRepair || !isManagerClosedError(err) {
 			return nil, mterrors.Wrap(err, "failed to observe local position")
 		}
 		pm.logger.InfoContext(ctx, "SetTermPrimary: local position unavailable for stale-primary repair; reopening connections",
@@ -933,7 +935,14 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 		pm.reopenConnections(ctx)
 		selfPos, err = pm.rules.observePosition(ctx)
 		if err != nil {
+			if !isManagerClosedError(err) {
+				return nil, mterrors.Wrap(err, "failed to observe local position after reopening connections")
+			}
 			selfPos = pm.rules.cachedPosition()
+			if selfPos == nil {
+				return nil, mterrors.Wrap(err, "failed to observe local position and no cached position is available")
+			}
+			positionUnavailableForRepair = true
 			pm.logger.InfoContext(ctx, "SetTermPrimary: proceeding with stale-primary repair despite unavailable local position",
 				"incoming_rule", rule.GetRuleNumber(),
 				"known_primary", knownPrimary,
@@ -957,9 +966,10 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 
 	// Decide between "standby update" and "stale-primary demote" based on
 	// actual postgres recovery state rather than topology — a node mid-promote
-	// or mid-demote may have a topology label that lags reality.
+	// or mid-demote may have a topology label that lags reality. If the query path
+	// is still closed after retry, stale-primary repair is the only useful route.
 	isPrimary := false
-	if !needsDemoteRepair {
+	if !needsRewind && !positionUnavailableForRepair {
 		isPrimary, err = pm.isPrimary(ctx)
 		if err != nil {
 			return nil, mterrors.Wrap(err, "failed to check recovery status")
@@ -972,7 +982,7 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 	// an SetTermPrimary is a notification, not a revoke.
 	consensusTerm := rule.GetRuleNumber().GetCoordinatorTerm()
 
-	if isPrimary || needsDemoteRepair {
+	if isPrimary || needsRewind || positionUnavailableForRepair {
 		pm.logger.InfoContext(ctx, "SetTermPrimary: demoting stale primary",
 			"new_leader", leader.GetId().GetName(),
 			"incoming_rule", rule.GetRuleNumber(),
@@ -1028,6 +1038,10 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 		}
 	}
 	return &consensusdatapb.SetTermPrimaryResponse{ConsensusStatus: cs}, nil
+}
+
+func isManagerClosedError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "manager is closed")
 }
 
 // ConsensusStatus returns the current status of this node for consensus

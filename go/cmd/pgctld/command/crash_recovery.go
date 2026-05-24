@@ -184,10 +184,20 @@ func moveSignalAside(dataDir, name string, logger *slog.Logger) (func() error, e
 	disabledPath := path + ".crash-recovery-disabled"
 
 	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to stat %s: %w", path, err)
 		}
-		return nil, fmt.Errorf("failed to stat %s: %w", path, err)
+		if _, disabledErr := os.Stat(disabledPath); disabledErr != nil {
+			if os.IsNotExist(disabledErr) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("failed to stat disabled signal %s: %w", disabledPath, disabledErr)
+		}
+		logger.Warn("Found recovery signal already disabled before crash recovery; will restore after attempt",
+			"signal", name,
+			"path", path,
+			"disabled_path", disabledPath)
+		return restoreRecoverySignal(path, disabledPath, name, logger), nil
 	}
 
 	if err := os.Remove(disabledPath); err != nil && !os.IsNotExist(err) {
@@ -200,6 +210,10 @@ func moveSignalAside(dataDir, name string, logger *slog.Logger) (func() error, e
 		"signal", name,
 		"path", path)
 
+	return restoreRecoverySignal(path, disabledPath, name, logger), nil
+}
+
+func restoreRecoverySignal(path, disabledPath, name string, logger *slog.Logger) func() error {
 	return func() error {
 		if _, err := os.Stat(path); err == nil {
 			return fmt.Errorf("cannot restore %s: file already exists", path)
@@ -213,5 +227,5 @@ func moveSignalAside(dataDir, name string, logger *slog.Logger) (func() error, e
 			"signal", name,
 			"path", path)
 		return nil
-	}, nil
+	}
 }
