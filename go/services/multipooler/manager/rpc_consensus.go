@@ -939,10 +939,13 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 			return nil, mterrors.Wrap(err, "failed to observe local position after reopening connections")
 		}
 	}
+	if selfPos == nil {
+		return nil, mterrors.New(mtrpcpb.Code_INTERNAL, "observed local position is nil")
+	}
 
 	// Compare by RuleNumber only — LSN is intentionally not part of the gate.
 	// See SetTermPrimaryRequest's proto comment for the reasoning.
-	if selfPos != nil && commonconsensus.CompareRuleNumbers(rule.GetRuleNumber(), selfPos.GetRule().GetRuleNumber()) <= 0 {
+	if commonconsensus.CompareRuleNumbers(rule.GetRuleNumber(), selfPos.GetRule().GetRuleNumber()) <= 0 {
 		pm.logger.InfoContext(ctx, "SetTermPrimary: incoming rule not higher, no-op",
 			"incoming_rule", rule.GetRuleNumber(),
 			"self_rule", selfPos.GetRule().GetRuleNumber())

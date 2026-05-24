@@ -604,6 +604,16 @@ func TestSetTermPrimary_ApplyPathErrors(t *testing.T) {
 			expectErrMatch: "failed to observe local position",
 		},
 		{
+			// ruleStorer promises a non-nil position on nil error. If an
+			// implementation violates that contract, fail closed before any
+			// consensus-affecting SetTermPrimary mutation.
+			name:           "ObservePositionNil",
+			ruleStore:      &fakeRuleStore{pos: nil, allowNilPosition: true},
+			setupMocks:     func(_ *mock.QueryService) {},
+			setupManager:   func(pm *MultiPoolerManager) { pm.multipooler.Type = clustermetadatapb.PoolerType_REPLICA },
+			expectErrMatch: "observed local position is nil",
+		},
+		{
 			// isPrimary check (pg_is_in_recovery) fails: SetTermPrimary cannot
 			// route between the standby and stale-primary branches.
 			name:      "IsPrimaryQueryFails",

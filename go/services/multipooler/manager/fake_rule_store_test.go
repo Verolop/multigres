@@ -99,6 +99,7 @@ type fakeRuleStore struct {
 	mu                 sync.Mutex
 	pos                *clustermetadatapb.PoolerPosition
 	posSequence        []*clustermetadatapb.PoolerPosition
+	allowNilPosition   bool
 	observeErr         error
 	observeErrSequence []error
 	observeCount       int
@@ -122,12 +123,12 @@ func (f *fakeRuleStore) observePosition(_ context.Context) (*clustermetadatapb.P
 	if len(f.posSequence) > 0 {
 		pos := f.posSequence[0]
 		f.posSequence = f.posSequence[1:]
-		if pos == nil && observeErr == nil {
+		if pos == nil && observeErr == nil && !f.allowNilPosition {
 			return nil, errors.New("fakeRuleStore: no position set")
 		}
 		return pos, observeErr
 	}
-	if f.pos == nil && observeErr == nil {
+	if f.pos == nil && observeErr == nil && !f.allowNilPosition {
 		return nil, errors.New("fakeRuleStore: no position set")
 	}
 	return f.pos, observeErr
