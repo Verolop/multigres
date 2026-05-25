@@ -21,9 +21,9 @@ import (
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
 )
 
-// Exploratory guard for bootstrap-to-failover testing: do not commit a
-// zero-spare initial cohort. Otherwise the first failover can fail outgoing
-// quorum before exercising the recovery logic under test.
+// For bootstrap-to-failover lifecycle testing, do not commit a zero-spare
+// initial cohort. Otherwise the first failover can fail outgoing quorum before
+// exercising the recovery logic under test.
 func CheckInitialCohortHeadroom(policyProto *clustermetadatapb.DurabilityPolicy, proposedCohort []*clustermetadatapb.ID) error {
 	policy, err := NewPolicyFromProto(policyProto)
 	if err != nil {

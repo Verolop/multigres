@@ -108,8 +108,7 @@ func (a *ShardInitAction) Execute(ctx context.Context, problem types.Problem) er
 		return mterrors.Wrap(err, "failed to parse durability policy")
 	}
 
-	// Ensure the initialized poolers we see can satisfy the durability policy
-	// and leave at least one spare member for recovery.
+	// Apply the bootstrap headroom guard before claiming the initial cohort.
 	initializedIDs := make([]*clustermetadatapb.ID, len(initializedPoolers))
 	for i, p := range initializedPoolers {
 		initializedIDs[i] = p.MultiPooler.Id

@@ -145,10 +145,10 @@ func runSingleUserPostgres(ctx context.Context) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-// Exploratory patch for primary replacement testing: an old primary can need
-// crash recovery before pg_rewind, while standby.signal from a failed restart
-// prevents postgres --single from starting. Hide the signal files only for the
-// single-user crash-recovery attempt, then restore them before normal startup.
+// For primary-replacement lifecycle testing, an old primary can need crash
+// recovery before pg_rewind, while standby.signal from a failed restart prevents
+// postgres --single from starting. Hide the signal files only for the single-user
+// crash-recovery attempt, then restore them before normal startup.
 func withRecoverySignalsDisabled(dataDir string, logger *slog.Logger, fn func() error) error {
 	restores := make([]func() error, 0, 2)
 	for _, name := range []string{"standby.signal", "recovery.signal"} {

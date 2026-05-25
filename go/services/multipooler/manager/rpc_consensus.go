@@ -593,8 +593,8 @@ func (pm *MultiPoolerManager) Recruit(ctx context.Context, req *consensusdatapb.
 		return nil, raceErr
 	}
 	if isPrimary {
-		// Exploratory patch for the next recovery round: a successful Recruit is
-		// a coordinated handoff, so leave the node recruitable afterward.
+		// For the next recovery round, a successful Recruit is a coordinated
+		// handoff, so leave the node recruitable afterward.
 		pm.rewindPending.Store(false)
 	}
 
@@ -911,8 +911,8 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 	//     postgres was unavailable.
 	pm.consensusState.RecordTermPrimary(rule, leader)
 
-	// Exploratory patch for stale-primary repair testing: route both a real
-	// rewindPending node and a manager-closed demoted primary through repair.
+	// For stale-primary repair testing, route both a real rewindPending node and
+	// a manager-closed demoted primary through repair.
 	needsRewind := pm.rewindPending.Load()
 	knownPrimary := pm.getPoolerType() == clustermetadatapb.PoolerType_PRIMARY
 	needsDemoteRepair := needsRewind || knownPrimary

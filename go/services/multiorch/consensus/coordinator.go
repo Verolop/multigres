@@ -118,8 +118,8 @@ func (c *Coordinator) AppointLeader(ctx context.Context, shardID string, cohort 
 }
 
 // runFailover wires the new-flow failover callbacks for a coordinatorLedRuleChange.
-// Exploratory patch for AZ-loss testing: keep a reachable demoted primary in
-// Recruit so the run can test re-promotion instead of failing quorum early.
+// For the AZ-loss lifecycle check, keep a reachable demoted primary in Recruit
+// so the run can test re-promotion instead of failing quorum early.
 func (c *Coordinator) runFailover(ctx context.Context, cohort []*multiorchdatapb.PoolerHealthState, reason string) error {
 	if len(cohort) == 0 {
 		return mterrors.Errorf(mtrpcpb.Code_UNAVAILABLE,
@@ -164,8 +164,9 @@ func (c *Coordinator) appointLeaderWithTerm(ctx context.Context, shardID string,
 		return mterrors.Wrap(err, "failed to parse durability policy")
 	}
 
-	// The legacy BeginTerm flow still drops self-revoked poolers because their
-	// BeginTerm RPC can block behind the same demotion lock.
+	// This branch does not change the BeginTerm path. It is exercising the
+	// Recruit/Propose flow; BeginTerm keeps its existing filtering because those
+	// RPCs can block behind the demotion lock.
 	filteredCohort := make([]*multiorchdatapb.PoolerHealthState, 0, len(cohort))
 	for _, p := range cohort {
 		if types.LeaderNeedsReplacement(p) {

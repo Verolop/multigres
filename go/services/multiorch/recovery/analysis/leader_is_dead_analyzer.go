@@ -48,8 +48,8 @@ func (a *LeaderIsDeadAnalyzer) Analyze(sa *ShardAnalysis) ([]types.Problem, erro
 	}
 
 	if sa.HighestTermDiscoveredLeaderID == nil {
-		// Exploratory path for no-primary testing: after a cohort exists, no
-		// known leader should enter appointment instead of sitting idle.
+		// For no-primary lifecycle testing, an established cohort with no known
+		// leader should enter appointment instead of sitting idle.
 		if !sa.HasInitializedReplica || !hasEstablishedCohort(sa) {
 			return nil, nil
 		}

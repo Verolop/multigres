@@ -40,9 +40,9 @@ func TestSpuriousFailoverRecoveryWithMultipleOrchs(t *testing.T) {
 	testSpuriousFailoverRecovery(t, 3)
 }
 
-// This evidence test turns the EKS failure shape into a local lifecycle check:
-// bootstrap with spare headroom, force a Recruit fanout, then verify multiorch
-// can recover without manual intervention.
+// This recreates the lifecycle blocker locally: bootstrap with spare headroom,
+// force a Recruit fanout, then verify multiorch can recover without manual
+// intervention.
 func testSpuriousFailoverRecovery(t *testing.T, multiOrchCount int) {
 	t.Helper()
 	if testing.Short() {

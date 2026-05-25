@@ -369,8 +369,8 @@ func (cw *cellPoolerWatcher) sync(ctx context.Context) error {
 func (cw *cellPoolerWatcher) handlePoolerEvent(wd *topoclient.WatchDataRecursive) {
 	if wd.Err != nil {
 		if errors.Is(wd.Err, &topoclient.TopoError{Code: topoclient.NoNode}) {
-			// Exploratory patch for scale-down testing: remove exact deleted
-			// poolers before stale membership affects later recovery.
+			// For scale-down lifecycle testing, remove exact deleted poolers
+			// before stale membership affects later recovery.
 			poolerID := extractPoolerIDFromPath(wd.Path)
 			if poolerID != "" && cw.store.Delete(poolerID) {
 				cw.logger.Info("pooler removed from topology; deleted from pooler store",

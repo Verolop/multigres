@@ -1195,9 +1195,8 @@ func (pm *MultiPoolerManager) demoteStalePrimaryLocked(
 		return false, "", mterrors.Wrap(err, "failed to update topology")
 	}
 
-	// Keep rewindPending until the stale-primary repair has restarted PostgreSQL
-	// as a standby and updated topology. This lets lifecycle testing distinguish
-	// "rewind finished" from "node is safe to recruit again".
+	// For stale-primary lifecycle testing, keep rewindPending until PostgreSQL is
+	// running as a standby and topology no longer reports this node as primary.
 	pm.rewindPending.Store(false)
 
 	return rewindPerformed, finalLSN, nil
