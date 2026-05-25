@@ -41,8 +41,8 @@ func TestSpuriousFailoverRecoveryWithMultipleOrchs(t *testing.T) {
 }
 
 // This recreates the lifecycle blocker locally: bootstrap with spare headroom,
-// force a Recruit fanout, then verify multiorch can recover without manual
-// intervention.
+// force a Recruit fanout, then verify the run can continue through multiorch
+// recovery without manual intervention.
 func testSpuriousFailoverRecovery(t *testing.T, multiOrchCount int) {
 	t.Helper()
 	if testing.Short() {

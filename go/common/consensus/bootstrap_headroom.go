@@ -23,7 +23,7 @@ import (
 
 // For bootstrap-to-failover lifecycle testing, do not commit a zero-spare
 // initial cohort. Otherwise the first failover can fail outgoing quorum before
-// exercising the recovery logic under test.
+// exercising the failover and recovery paths this branch is trying to inspect.
 func CheckInitialCohortHeadroom(policyProto *clustermetadatapb.DurabilityPolicy, proposedCohort []*clustermetadatapb.ID) error {
 	policy, err := NewPolicyFromProto(policyProto)
 	if err != nil {

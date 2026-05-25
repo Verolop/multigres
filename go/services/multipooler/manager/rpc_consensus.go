@@ -594,7 +594,8 @@ func (pm *MultiPoolerManager) Recruit(ctx context.Context, req *consensusdatapb.
 	}
 	if isPrimary {
 		// For the next recovery round, a successful Recruit is a coordinated
-		// handoff, so leave the node recruitable afterward.
+		// handoff. Leave the node recruitable so the test can continue past the
+		// first demotion.
 		pm.rewindPending.Store(false)
 	}
 
@@ -912,7 +913,8 @@ func (pm *MultiPoolerManager) SetTermPrimary(ctx context.Context, req *consensus
 	pm.consensusState.RecordTermPrimary(rule, leader)
 
 	// For stale-primary repair testing, route both a real rewindPending node and
-	// a manager-closed demoted primary through repair.
+	// a manager-closed demoted primary through repair so SetTermPrimary does not
+	// stop the lifecycle run at "manager is closed".
 	needsRewind := pm.rewindPending.Load()
 	knownPrimary := pm.getPoolerType() == clustermetadatapb.PoolerType_PRIMARY
 	needsDemoteRepair := needsRewind || knownPrimary
