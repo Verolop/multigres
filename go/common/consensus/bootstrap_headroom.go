@@ -21,10 +21,9 @@ import (
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
 )
 
-// CheckInitialCohortHeadroom verifies that a bootstrap cohort both satisfies
-// the durability policy and has one spare member for recovery. Without spare
-// headroom, a later failover can require every committed member and wedge if
-// the initial primary is recruited or excluded during recovery.
+// Exploratory guard for bootstrap-to-failover testing: do not commit a
+// zero-spare initial cohort. Otherwise the first failover can fail outgoing
+// quorum before exercising the recovery logic under test.
 func CheckInitialCohortHeadroom(policyProto *clustermetadatapb.DurabilityPolicy, proposedCohort []*clustermetadatapb.ID) error {
 	policy, err := NewPolicyFromProto(policyProto)
 	if err != nil {

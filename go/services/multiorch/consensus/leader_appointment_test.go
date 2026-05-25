@@ -1762,10 +1762,7 @@ func TestAppointLeader_NewFlow_RecruitsReachableResignedPrimary(t *testing.T) {
 		cohort = append(cohort, mp)
 	}
 
-	// mp1 was the freshly promoted primary, then accepted a later Recruit and
-	// signalled REQUESTING_DEMOTION. It is still reachable and has the most
-	// advanced WAL. mp3 is unavailable, so excluding mp1 would leave only one
-	// recruited outgoing cohort member under AT_LEAST_2 and wedge recovery.
+	// mp1 is resigned but reachable; excluding it would lose quorum here.
 	cohort[0].AvailabilityStatus = &clustermetadatapb.AvailabilityStatus{
 		LeadershipStatus: &clustermetadatapb.LeadershipStatus{
 			LeaderTerm: 6,
@@ -1952,8 +1949,7 @@ func TestAppointInitialLeader_NewFlow(t *testing.T) {
 
 	c := NewCoordinator(coordID, ts, fakeClient, logger, true /* useNewFlow */)
 
-	// AT_LEAST_3 plus the initial spare-member requirement gives us a
-	// 4-member bootstrap cohort.
+	// AT_LEAST_3 needs one spare member at bootstrap.
 	cohortIDs := []*clustermetadatapb.ID{
 		{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "mp1"},
 		{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "mp2"},

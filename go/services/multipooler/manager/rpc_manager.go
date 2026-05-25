@@ -1195,8 +1195,9 @@ func (pm *MultiPoolerManager) demoteStalePrimaryLocked(
 		return false, "", mterrors.Wrap(err, "failed to update topology")
 	}
 
-	// The stale-primary repair is complete only after PostgreSQL is running as a
-	// standby and topology no longer reports this node as a primary.
+	// Keep rewindPending until the stale-primary repair has restarted PostgreSQL
+	// as a standby and updated topology. This lets lifecycle testing distinguish
+	// "rewind finished" from "node is safe to recruit again".
 	pm.rewindPending.Store(false)
 
 	return rewindPerformed, finalLSN, nil
@@ -1581,9 +1582,7 @@ func (pm *MultiPoolerManager) runPgRewind(ctx context.Context, sourceHost string
 		return true, nil
 	}
 
-	// No divergence: the node is already in sync with the source. The caller
-	// still owns the rest of the repair sequence and will clear rewindPending
-	// only after PostgreSQL is running and topology is updated.
+	// No divergence: the caller still owns the rest of the stale-primary repair.
 	pm.logger.InfoContext(ctx, "No divergence, skipping rewind")
 	return false, nil
 }

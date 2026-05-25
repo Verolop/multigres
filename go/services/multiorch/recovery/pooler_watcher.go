@@ -369,12 +369,8 @@ func (cw *cellPoolerWatcher) sync(ctx context.Context) error {
 func (cw *cellPoolerWatcher) handlePoolerEvent(wd *topoclient.WatchDataRecursive) {
 	if wd.Err != nil {
 		if errors.Is(wd.Err, &topoclient.TopoError{Code: topoclient.NoNode}) {
-			// A NoNode for the exact pooler metadata file means topology has
-			// already removed this pod from the shard. Drop it from the recovery
-			// store immediately so scale-down cannot leave a stale PRIMARY or
-			// cohort member behind. This intentionally treats exact Pooler-file
-			// deletion as authoritative instead of waiting for unseen-instance
-			// bookkeeping; other NoNode shapes are ignored below.
+			// Exploratory patch for scale-down testing: remove exact deleted
+			// poolers before stale membership affects later recovery.
 			poolerID := extractPoolerIDFromPath(wd.Path)
 			if poolerID != "" && cw.store.Delete(poolerID) {
 				cw.logger.Info("pooler removed from topology; deleted from pooler store",
@@ -442,8 +438,7 @@ func (cw *cellPoolerWatcher) handlePoolerEvent(wd *topoclient.WatchDataRecursive
 	}
 }
 
-// extractPoolerIDFromPath extracts the pooler ID from a poolers/<id>/Pooler
-// watch path. It handles both relative memorytopo paths and absolute etcd paths.
+// extractPoolerIDFromPath handles both memorytopo and etcd watch paths.
 func extractPoolerIDFromPath(watchPath string) string {
 	parts := strings.Split(strings.Trim(watchPath, "/"), "/")
 	for i := range parts {

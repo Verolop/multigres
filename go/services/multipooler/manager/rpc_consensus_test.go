@@ -1537,8 +1537,6 @@ func TestRecruit(t *testing.T) {
 
 	t.Run("PrimaryRecruit_ClearsRewindPendingAfterAcceptedRevocation", func(t *testing.T) {
 		mockQueryService := mock.NewQueryService()
-		// Recruit observes primary before demotion, then verifies standby after
-		// restartPostgresAsStandby.
 		mockQueryService.AddQueryPatternOnce("SELECT pg_is_in_recovery",
 			mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"f"}}))
 		mockQueryService.AddQueryPatternOnce("SELECT pg_is_in_recovery",

@@ -117,12 +117,9 @@ func (c *Coordinator) AppointLeader(ctx context.Context, shardID string, cohort 
 	return c.appointLeaderWithTerm(ctx, shardID, cohort, policy, proposedTerm, reason)
 }
 
-// runFailover wires the new-flow failover callbacks for a coordinatorLedRuleChange
-// and runs it. Keep resigned poolers in the recruitment cohort: a primary can
-// resign because it accepted a coordinator revocation, not because it is
-// unreachable or unsafe to re-promote. Removing it before recruitment can make a
-// two-survivor AZ-loss case fail outgoing quorum even though the resigned pooler
-// is reachable and has the most advanced WAL.
+// runFailover wires the new-flow failover callbacks for a coordinatorLedRuleChange.
+// Exploratory patch for AZ-loss testing: keep a reachable demoted primary in
+// Recruit so the run can test re-promotion instead of failing quorum early.
 func (c *Coordinator) runFailover(ctx context.Context, cohort []*multiorchdatapb.PoolerHealthState, reason string) error {
 	if len(cohort) == 0 {
 		return mterrors.Errorf(mtrpcpb.Code_UNAVAILABLE,
@@ -167,19 +164,8 @@ func (c *Coordinator) appointLeaderWithTerm(ctx context.Context, shardID string,
 		return mterrors.Wrap(err, "failed to parse durability policy")
 	}
 
-	// The legacy BeginTerm flow still drops poolers that have self-revoked via REQUESTING_DEMOTION. Their
-	// BeginTerm RPC would block on the action lock held by their own
-	// graceful-shutdown sequence (e.g. while pgctld.Stop runs), and the
-	// legacy recruit fan-out waits for every goroutine — so a single
-	// resigning leader would stall failover by the full shutdown budget.
-	// Excluding them before preVote is important: preVote uses the cohort
-	// for its quorum check, so counting a pooler we're not going to recruit
-	// would cause preVote to pass against a quorum it can't actually achieve.
-	// selectCandidate refuses to elect a resigned pooler in any case, so the
-	// only thing we lose by skipping them is uncommitted WAL position,
-	// which sync replication makes safe to drop. (The new Recruit/Propose
-	// flow in rule_change.go does not have this bug — it commits as soon as
-	// quorum is recruited, so a slow node doesn't stall the path.)
+	// The legacy BeginTerm flow still drops self-revoked poolers because their
+	// BeginTerm RPC can block behind the same demotion lock.
 	filteredCohort := make([]*multiorchdatapb.PoolerHealthState, 0, len(cohort))
 	for _, p := range cohort {
 		if types.LeaderNeedsReplacement(p) {

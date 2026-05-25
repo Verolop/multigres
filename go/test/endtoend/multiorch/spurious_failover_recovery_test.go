@@ -40,6 +40,9 @@ func TestSpuriousFailoverRecoveryWithMultipleOrchs(t *testing.T) {
 	testSpuriousFailoverRecovery(t, 3)
 }
 
+// This evidence test turns the EKS failure shape into a local lifecycle check:
+// bootstrap with spare headroom, force a Recruit fanout, then verify multiorch
+// can recover without manual intervention.
 func testSpuriousFailoverRecovery(t *testing.T, multiOrchCount int) {
 	t.Helper()
 	if testing.Short() {
@@ -65,9 +68,7 @@ func testSpuriousFailoverRecovery(t *testing.T, multiOrchCount int) {
 	primaryName := waitForShardReady(t, setup, 2 /* expectedStandbyCount */, 60*time.Second)
 	t.Logf("Bootstrap complete; primary=%s", primaryName)
 
-	// Pause every coordinator while injecting the Recruit fanout so the test owns
-	// the failure shape. Resuming all of them exercises recovery with the same
-	// multi-orch coordinator population that exists in production-like setups.
+	// Pause recovery while injecting the Recruit fanout.
 	var resumeRecovery []func()
 	for _, orchName := range sortedMultiOrchNames(setup) {
 		resumeRecovery = append(resumeRecovery, setup.DisableRecovery(t, orchName))

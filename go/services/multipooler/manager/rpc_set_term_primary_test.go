@@ -260,36 +260,23 @@ func TestSetTermPrimary_StandbyAppliesNewPrimary(t *testing.T) {
 	assert.Equal(t, "primary-host", recorded.GetHost())
 }
 
-// TestSetTermPrimary_StalePrimaryDemotes verifies the stale-primary branch end to end:
-// when the receiver is acting as primary (pg_is_in_recovery=false) and the
-// supplied position is higher, SetTermPrimary must drive a full demote — pg_rewind,
-// restart as standby, set primary_conninfo at the new primary, flip topology
-// to REPLICA, advance the consensus term, and update the gateway's leader
-// observation. demoteStalePrimaryLocked itself is also covered by
-// TestDemoteStalePrimary_UpdatesConsensusTerm; this test pins down SetTermPrimary's
-// routing decision plus the wiring that the helper expects from its caller.
+// TestSetTermPrimary_StalePrimaryDemotes verifies the full stale-primary path
+// from SetTermPrimary into demoteStalePrimaryLocked.
 func TestSetTermPrimary_StalePrimaryDemotes(t *testing.T) {
 	mockQueryService := mock.NewQueryService()
 
-	// SetTermPrimary's routing check sees this pooler still acting as primary.
 	mockQueryService.AddQueryPatternOnce("SELECT pg_is_in_recovery",
 		mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"f"}}))
 
-	// After restart, every later pg_is_in_recovery check must report standby.
-	// Covers isInRecovery (verify after restart), resetSynchronousReplication's
-	// role check, and setPrimaryConnInfoLocked's guardrail.
 	mockQueryService.AddQueryPattern("SELECT pg_is_in_recovery",
 		mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"t"}}))
 
-	// waitForDatabaseConnection polls SELECT 1 after the standby restart.
 	mockQueryService.AddQueryPattern("^SELECT 1$", mock.MakeQueryResult(nil, nil))
 
-	// resetSynchronousReplication clears sync standby list and reloads.
 	mockQueryService.AddQueryPatternOnce("ALTER SYSTEM RESET synchronous_standby_names",
 		mock.MakeQueryResult(nil, nil))
 	expectReloadConfig(mockQueryService)
 
-	// setPrimaryConnInfoLocked(false, false): rewrite primary_conninfo + reload.
 	var capturedConnInfoSQL string
 	mockQueryService.AddQueryPatternWithCallback(
 		"ALTER SYSTEM SET primary_conninfo",
@@ -298,15 +285,11 @@ func TestSetTermPrimary_StalePrimaryDemotes(t *testing.T) {
 	)
 	expectReloadConfig(mockQueryService)
 
-	// getStandbyReplayLSN — best-effort LSN read after demote.
 	mockQueryService.AddQueryPattern("SELECT pg_last_wal_replay_lsn",
 		mock.MakeQueryResult([]string{"pg_last_wal_replay_lsn"}, [][]any{{"0/2000"}}))
 
 	pm, _ := setupManagerWithMockDB(t, mockQueryService, &fakeRuleStore{pos: makeRulePosition(3)})
 
-	// Persist an initial revocation lower than the incoming rule's
-	// coordinator_term so updateTermIfNewer (inside demoteStalePrimaryLocked)
-	// has work to do and we can assert it ran.
 	require.NoError(t, pm.consensusState.setRevocation(
 		&clustermetadatapb.TermRevocation{RevokedBelowTerm: 3},
 	))
@@ -323,25 +306,19 @@ func TestSetTermPrimary_StalePrimaryDemotes(t *testing.T) {
 	require.NotNil(t, resp)
 	require.NotNil(t, resp.ConsensusStatus)
 
-	// primary_conninfo points at the new primary.
 	assert.Contains(t, capturedConnInfoSQL, "host=primary-host",
 		"rendered primary_conninfo should reference the new primary host")
 
-	// Manager state recorded the new primary.
 	recorded := pm.consensusState.GetReplicationPrimary().GetPrimary()
 	require.NotNil(t, recorded)
 	assert.Equal(t, "new-primary", recorded.GetId().GetName())
 	assert.Equal(t, "primary-host", recorded.GetHost())
 
-	// SetTermPrimary must NOT touch term_revocation. The revocation seeded above
-	// (revoked_below_term=3) is preserved verbatim. Revocations are authored
-	// by coordinators via Recruit, not by side effects of SetTermPrimary.
 	rev, err := pm.consensusState.getRevocation()
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), rev.GetRevokedBelowTerm(),
 		"SetTermPrimary must not bump revoked_below_term — that's a coordinator responsibility")
 
-	// Gateway leader observation should reflect the new primary.
 	healthState := pm.healthStreamer.getState()
 	require.NotNil(t, healthState.LeaderObservation)
 	assert.Equal(t, "new-primary", healthState.LeaderObservation.LeaderID.Name)
@@ -351,14 +328,11 @@ func TestSetTermPrimary_StalePrimaryDemotes(t *testing.T) {
 func TestSetTermPrimary_KnownPrimaryDoesNotDemoteWithoutFreshPosition(t *testing.T) {
 	mockQueryService := mock.NewQueryService()
 
-	// After restart, every pg_is_in_recovery check should report standby.
 	mockQueryService.AddQueryPattern("SELECT pg_is_in_recovery",
 		mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"t"}}))
 
-	// waitForDatabaseConnection polls SELECT 1 after the standby restart.
 	mockQueryService.AddQueryPattern("^SELECT 1$", mock.MakeQueryResult(nil, nil))
 
-	// resetSynchronousReplication clears sync standby list and reloads.
 	mockQueryService.AddQueryPatternOnce("ALTER SYSTEM RESET synchronous_standby_names",
 		mock.MakeQueryResult(nil, nil))
 	expectReloadConfig(mockQueryService)
@@ -388,8 +362,6 @@ func TestSetTermPrimary_KnownPrimaryDoesNotDemoteWithoutFreshPosition(t *testing
 	assert.Contains(t, err.Error(), "failed to observe local position after reopening connections")
 	assert.Nil(t, resp)
 
-	// Do not make a consensus-affecting demotion from cached state when the
-	// authoritative position remains unreadable.
 	assert.Empty(t, capturedConnInfoSQL)
 	assert.Equal(t, clustermetadatapb.PoolerType_PRIMARY, pm.getPoolerType())
 }
@@ -590,10 +562,6 @@ func TestSetTermPrimary_ApplyPathErrors(t *testing.T) {
 		expectErrMatch string
 	}{
 		{
-			// observePosition fails: SetTermPrimary cannot decide whether the
-			// incoming rule is higher than the recorded one. Caller learns about
-			// the failure rather than silently dropping the SetTermPrimary when
-			// the node is not already marked for rewind.
 			name: "ObservePositionFails",
 			ruleStore: &fakeRuleStore{
 				pos:        makeRulePosition(3),
@@ -604,9 +572,6 @@ func TestSetTermPrimary_ApplyPathErrors(t *testing.T) {
 			expectErrMatch: "failed to observe local position",
 		},
 		{
-			// ruleStorer promises a non-nil position on nil error. If an
-			// implementation violates that contract, fail closed before any
-			// consensus-affecting SetTermPrimary mutation.
 			name:           "ObservePositionNil",
 			ruleStore:      &fakeRuleStore{pos: nil, allowNilPosition: true},
 			setupMocks:     func(_ *mock.QueryService) {},
@@ -614,8 +579,6 @@ func TestSetTermPrimary_ApplyPathErrors(t *testing.T) {
 			expectErrMatch: "observed local position is nil",
 		},
 		{
-			// isPrimary check (pg_is_in_recovery) fails: SetTermPrimary cannot
-			// route between the standby and stale-primary branches.
 			name:      "IsPrimaryQueryFails",
 			ruleStore: &fakeRuleStore{pos: makeRulePosition(3)},
 			setupMocks: func(m *mock.QueryService) {

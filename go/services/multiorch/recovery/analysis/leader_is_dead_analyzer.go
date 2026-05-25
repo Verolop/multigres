@@ -48,8 +48,8 @@ func (a *LeaderIsDeadAnalyzer) Analyze(sa *ShardAnalysis) ([]types.Problem, erro
 	}
 
 	if sa.HighestTermDiscoveredLeaderID == nil {
-		// Bootstrap handles empty-cohort shards. Once a cohort exists, a missing
-		// leader means an initialized shard needs a new appointment.
+		// Exploratory path for no-primary testing: after a cohort exists, no
+		// known leader should enter appointment instead of sitting idle.
 		if !sa.HasInitializedReplica || !hasEstablishedCohort(sa) {
 			return nil, nil
 		}
