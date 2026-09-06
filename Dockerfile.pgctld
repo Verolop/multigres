@@ -6,7 +6,8 @@
 # exact version read from go.mod, so go.mod is the single source of truth (see
 # .github/actions/go-version). Keep the default's minor in sync with go.mod.
 ARG GO_VERSION=1.26
-FROM golang:${GO_VERSION}-alpine AS builder
+# Run the Go compiler natively and cross-compile the static target binaries.
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 
 ARG GIT_COMMIT=unknown
 ARG COMMIT_DATE=unknown
@@ -24,7 +25,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN GIT_COMMIT="${GIT_COMMIT}" COMMIT_DATE="${COMMIT_DATE}" make build-release
+ARG TARGETOS
+ARG TARGETARCH
+RUN GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+    GIT_COMMIT="${GIT_COMMIT}" COMMIT_DATE="${COMMIT_DATE}" make build-release
 
 # =========================================================================
 # Stage 2: Final PostgreSQL + pgctld
