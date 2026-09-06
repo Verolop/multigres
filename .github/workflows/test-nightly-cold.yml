@@ -1,0 +1,115 @@
+# Temporary experiment for test/nightly-optimization; do not merge this workflow.
+name: Nightly Cold Build Experiment
+
+on:
+  push:
+    branches: [test/nightly-optimization]
+    paths:
+      - .github/workflows/test-nightly-cold.yml
+      - .github/scripts/inspect-nightly-cold-image.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-cold-experiment-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.case }} / ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        case: [original, cross-compile]
+        image: [multigres, pgctld, multiadmin-web, multigres-cluster, multigres-cluster-supabase]
+        include:
+          - image: multigres
+            context: .
+            file: Dockerfile
+          - image: pgctld
+            context: .
+            file: Dockerfile.pgctld
+          - image: multiadmin-web
+            context: web/multiadmin
+            file: web/multiadmin/Dockerfile
+          - image: multigres-cluster
+            context: .
+            file: Dockerfile.cluster
+          - image: multigres-cluster-supabase
+            context: .
+            file: Dockerfile.cluster
+            extra_build_args: |
+              POSTGRES_IMAGE=supabase/postgres:17.6.1.142-multigres
+              PROVISION_PG_PACKAGES=false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select original or optimized Dockerfile
+        id: dockerfile
+        env:
+          BUILD_CASE: ${{ matrix.case }}
+          DOCKERFILE: ${{ matrix.file }}
+        run: |
+          selected="${RUNNER_TEMP}/Dockerfile.cold-test"
+          if [ "$BUILD_CASE" = "original" ]; then
+            git show "c89daed846b992744e10bae43d6ca04f15c79d0e:${DOCKERFILE}" > "$selected"
+          else
+            cp "$DOCKERFILE" "$selected"
+          fi
+          cat "$selected"
+          echo "path=$selected" >> "$GITHUB_OUTPUT"
+
+      - name: Read Go version
+        id: goversion
+        uses: ./.github/actions/go-version
+
+      - name: Read commit date
+        id: commitdate
+        run: echo "date=$(git show -s --format=%cI HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up fresh Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build both architectures from scratch
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ steps.dockerfile.outputs.path }}
+          build-args: |
+            GO_VERSION=${{ steps.goversion.outputs.version }}
+            GIT_COMMIT=${{ github.sha }}
+            COMMIT_DATE=${{ steps.commitdate.outputs.date }}
+            ${{ matrix.extra_build_args }}
+          platforms: linux/amd64,linux/arm64
+          no-cache: true
+          push: false
+          outputs: type=oci,dest=${{ runner.temp }}/image.oci.tar
+          tags: nightly-cold-test:local
+          provenance: mode=max
+          sbom: true
+          # Export cost is included as in nightly, but there is no cache-from.
+          cache-to: type=gha,mode=max,scope=cold-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.case }}-${{ matrix.image }}
+
+      - name: Verify image platforms and static binary architectures
+        env:
+          IMAGE: ${{ matrix.image }}
+          BUILD_CASE: ${{ matrix.case }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python3 .github/scripts/inspect-nightly-cold-image.py \
+            "${RUNNER_TEMP}/image.oci.tar" "$IMAGE" "$BUILD_CASE" \
+            "$SOURCE_SHA" "${RUNNER_TEMP}/binary-digests.json"
+
+      - name: Upload binary digests for comparison
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cold-${{ matrix.case }}-${{ matrix.image }}
+          path: ${{ runner.temp }}/binary-digests.json
