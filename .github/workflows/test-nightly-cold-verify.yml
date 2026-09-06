@@ -2,11 +2,7 @@
 name: Verify Cold Build Outputs
 
 on:
-  push:
-    branches: [test/nightly-optimization]
-    paths:
-      - .github/workflows/test-nightly-cold-verify.yml
-      - .github/scripts/inspect-nightly-cold-image.py
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -32,6 +28,7 @@ jobs:
           SOURCE_JOB: ${{ matrix.source_job }}
         run: |
           for attempt in $(seq 1 60); do
+            echo "Waiting for source cold build (${attempt}/60)"
             result="$(gh api "repos/Verolop/multigres/actions/jobs/${SOURCE_JOB}" \
               --jq '.steps[] | select(.name == "Build both architectures from scratch") | .conclusion')"
             if [ "$result" = "success" ]; then
