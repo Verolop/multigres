@@ -80,6 +80,7 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Match nightly-build.yml so nightly can reuse main's build layers.
+          cache-from: type=gha,scope=multigres
+          cache-to: type=gha,mode=max,scope=multigres
           platforms: linux/amd64,linux/arm64
