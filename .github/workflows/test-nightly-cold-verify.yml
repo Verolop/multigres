@@ -1,0 +1,123 @@
+# Recover output verification only; these timings are not benchmark results.
+name: Verify Cold Build Outputs
+
+on:
+  push:
+    branches: [test/nightly-optimization]
+    paths:
+      - .github/workflows/test-nightly-cold-verify.yml
+      - .github/scripts/inspect-nightly-cold-image.py
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    name: Verify Supabase output (${{ matrix.case }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: original
+            source_job: 101569903191
+          - case: cross-compile
+            source_job: 101569903239
+    steps:
+      - name: Wait for the original cold build to export its output
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_JOB: ${{ matrix.source_job }}
+        run: |
+          for attempt in $(seq 1 60); do
+            result="$(gh api "repos/Verolop/multigres/actions/jobs/${SOURCE_JOB}" \
+              --jq '.steps[] | select(.name == "Build both architectures from scratch") | .conclusion')"
+            if [ "$result" = "success" ]; then
+              exit 0
+            fi
+            case "$result" in
+              failure|cancelled|skipped|timed_out)
+                echo "::error::Source cold build did not succeed: $result"
+                exit 1
+                ;;
+            esac
+            sleep 30
+          done
+          echo "::error::Timed out waiting for the source cold build"
+          exit 1
+
+      - name: Read corrected inspector
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Preserve corrected inspector outside build context
+        run: cp .github/scripts/inspect-nightly-cold-image.py "${RUNNER_TEMP}/inspect-image.py"
+
+      - name: Restore exact benchmark source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: 8cb09af9637e77dd34cc90e8846e8e34c6a43eb7
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Restore exact benchmark Dockerfile and metadata
+        id: inputs
+        env:
+          BUILD_CASE: ${{ matrix.case }}
+        run: |
+          selected="${RUNNER_TEMP}/Dockerfile.cold-test"
+          if [ "$BUILD_CASE" = "original" ]; then
+            git show c89daed846b992744e10bae43d6ca04f15c79d0e:Dockerfile.cluster > "$selected"
+          else
+            cp Dockerfile.cluster "$selected"
+          fi
+          {
+            echo "file=$selected"
+            echo "sha=$(git rev-parse HEAD)"
+            echo "date=$(git show -s --format=%cI HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read Go version
+        id: goversion
+        uses: ./.github/actions/go-version
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Recover exact benchmark image for verification
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: .
+          file: ${{ steps.inputs.outputs.file }}
+          build-args: |
+            GO_VERSION=${{ steps.goversion.outputs.version }}
+            GIT_COMMIT=${{ steps.inputs.outputs.sha }}
+            COMMIT_DATE=${{ steps.inputs.outputs.date }}
+            POSTGRES_IMAGE=supabase/postgres:17.6.1.142-multigres
+            PROVISION_PG_PACKAGES=false
+          platforms: linux/amd64,linux/arm64
+          push: false
+          outputs: type=oci,dest=${{ runner.temp }}/image.oci.tar
+          tags: nightly-cold-test:local
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=cold-34064167020-1-${{ matrix.case }}-multigres-cluster-supabase
+
+      - name: Verify final files after applying all layers
+        env:
+          BUILD_CASE: ${{ matrix.case }}
+          SOURCE_SHA: ${{ steps.inputs.outputs.sha }}
+        run: |
+          python3 "${RUNNER_TEMP}/inspect-image.py" \
+            "${RUNNER_TEMP}/image.oci.tar" multigres-cluster-supabase \
+            "$BUILD_CASE" "$SOURCE_SHA" "${RUNNER_TEMP}/binary-digests.json"
+
+      - name: Upload verified binary digests
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cold-verified-${{ matrix.case }}-multigres-cluster-supabase
+          path: ${{ runner.temp }}/binary-digests.json

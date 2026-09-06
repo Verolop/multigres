@@ -2,11 +2,6 @@
 name: Nightly Cold Build Experiment
 
 on:
-  push:
-    branches: [test/nightly-optimization]
-    paths:
-      - .github/workflows/test-nightly-cold.yml
-      - .github/scripts/inspect-nightly-cold-image.py
   workflow_dispatch:
 
 permissions:

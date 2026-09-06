@@ -45,15 +45,27 @@ with tarfile.open(archive_path) as archive:
                     if name not in expected or not member.isfile():
                         continue
                     data = files.extractfile(member).read()
-                    assert data[:6] == b"\x7fELF\x02\x01", name + ": expected little-endian ELF64"
-                    machine = struct.unpack_from("<H", data, 18)[0]
-                    assert machine == {"amd64": 62, "arm64": 183}[architecture], name + ": wrong architecture"
-                    phoff = struct.unpack_from("<Q", data, 32)[0]
-                    phentsize, phnum = struct.unpack_from("<HH", data, 54)
-                    assert all(struct.unpack_from("<I", data, phoff + i * phentsize)[0] != 3
-                               for i in range(phnum)), name + ": unexpected dynamic interpreter"
-                    binaries[name] = hashlib.sha256(data).hexdigest()
+                    elf64 = len(data) >= 64 and data[:6] == b"\x7fELF\x02\x01"
+                    machine = struct.unpack_from("<H", data, 18)[0] if elf64 else None
+                    static = False
+                    if elf64:
+                        phoff = struct.unpack_from("<Q", data, 32)[0]
+                        phentsize, phnum = struct.unpack_from("<HH", data, 54)
+                        static = all(struct.unpack_from("<I", data, phoff + i * phentsize)[0] != 3
+                                     for i in range(phnum))
+                    if name in binaries:
+                        print(f"{architecture}: {name} overwritten by a later layer; "
+                              f"previous ELF64={binaries[name]['elf64']}, final ELF64={elf64}")
+                    binaries[name] = dict(sha256=hashlib.sha256(data).hexdigest(),
+                                          elf64=elf64, machine=machine, static=static)
         assert set(binaries) == expected, (image, architecture, sorted(expected - set(binaries)))
+        # OCI layers apply in order. Validate the final file, not a base image's
+        # earlier placeholder at the same path.
+        for name, binary in binaries.items():
+            assert binary["elf64"], name + ": expected little-endian ELF64"
+            assert binary["machine"] == {"amd64": 62, "arm64": 183}[architecture], name + ": wrong architecture"
+            assert binary["static"], name + ": unexpected dynamic interpreter"
+        binaries = {name: binary["sha256"] for name, binary in binaries.items()}
         platforms[architecture] = {"binaries": binaries}
     assert set(platforms) == {"amd64", "arm64"}, platforms.keys()
 
