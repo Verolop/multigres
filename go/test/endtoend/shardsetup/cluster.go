@@ -53,6 +53,7 @@ type MultipoolerInstance struct {
 // ShardSetup holds shared test infrastructure for a single shard.
 // MultipoolerInstances are stored in a map by name for flexible access.
 type ShardSetup struct {
+	lifetime       *Lifetime
 	TempDir        string
 	TempDirCleanup func()
 	EtcdClientAddr string
@@ -271,13 +272,13 @@ func (s *ShardSetup) CreateMultipoolerInstance(t *testing.T, name string, grpcPo
 	}
 
 	// Allocate a port for pgBackRest server (one per multipooler)
-	pgbackrestPort := utils.GetFreePort(t)
+	pgbackrestPort := s.port(t)
 
 	// Allocate an HTTP port for pgctld health endpoints
-	pgctldHttpPort := utils.GetFreePort(t)
+	pgctldHttpPort := s.port(t)
 
 	// Allocate an HTTP port for multipooler (prevents port collision with dynamic allocation)
-	multipoolerHttpPort := utils.GetFreePort(t)
+	multipoolerHttpPort := s.port(t)
 
 	// Create pgctld instance
 	pgbackrestCertDir := filepath.Join(s.TempDir, "certs")
@@ -295,6 +296,7 @@ func (s *ShardSetup) CreateMultipoolerInstance(t *testing.T, name string, grpcPo
 		Multipooler: multipooler,
 	}
 
+	inst.Pgctld.lifetime, inst.Multipooler.lifetime = s.lifetime, s.lifetime
 	s.Multipoolers[name] = inst
 	return inst
 }
@@ -379,8 +381,8 @@ func (s *ShardSetup) CreateMultiorchInstance(t *testing.T, name string, watchTar
 	err := os.MkdirAll(orchDataDir, 0o755)
 	require.NoError(t, err)
 
-	grpcPort := utils.GetFreePort(t)
-	httpPort := utils.GetFreePort(t)
+	grpcPort := s.port(t)
+	httpPort := s.port(t)
 
 	instance := &ProcessInstance{
 		Name:                               name,
@@ -408,6 +410,7 @@ func (s *ShardSetup) CreateMultiorchInstance(t *testing.T, name string, watchTar
 		instance.LeaderFailoverGracePeriodMaxJitter = "0s"
 	}
 
+	instance.lifetime = s.lifetime
 	s.MultiorchInstances[name] = instance
 
 	return instance, instance.CleanupFunc(t.Logf)
@@ -439,6 +442,7 @@ func (s *ShardSetup) CreateMultigatewayInstance(t *testing.T, name string, pgPor
 		inst.TLSKeyFile = s.MultigatewayTLSCertPaths.ServerKeyFile
 	}
 
+	inst.lifetime = s.lifetime
 	s.Multigateway = inst
 	s.MultigatewayPgPort = pgPort
 
@@ -463,6 +467,7 @@ func (s *ShardSetup) CreateMultiadminInstance(t *testing.T, name string, httpPor
 		Environment: os.Environ(),
 	}
 
+	inst.lifetime = s.lifetime
 	s.Multiadmin = inst
 	s.MultiadminHttpPort = httpPort
 	s.MultiadminGrpcPort = grpcPort
@@ -536,6 +541,16 @@ func (s *ShardSetup) waitForMultigatewayQueryServingOnPort(t *testing.T, pgPort 
 // If testsFailed is true, preserves the temp directory with logs for debugging.
 // Follows the pattern from multipooler/setup_test.go:cleanupSharedTestSetup.
 func (s *ShardSetup) Cleanup(testsFailed bool) {
+	if s != nil && s.lifetime != nil {
+		if err := s.lifetime.Close(testsFailed); err != nil {
+			fmt.Fprintf(os.Stderr, "setup quarantined: %v\n", err)
+		}
+		return
+	}
+	s.cleanupLegacy(testsFailed)
+}
+
+func (s *ShardSetup) cleanupLegacy(testsFailed bool) {
 	if s == nil {
 		return
 	}
@@ -568,10 +583,14 @@ func (s *ShardSetup) Cleanup(testsFailed bool) {
 		mo.TerminateGracefully(logf, 5*time.Second)
 	}
 
-	// Cancel the context to terminate any remaining processes. Processes
-	// wrapped in run_in_test.sh (etcd) are started with
-	// context.Background() and use a separate goroutine to detect context
-	// cancellation and clean up.
+	if s.EtcdCmd != nil && s.EtcdCmd.Process != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = s.EtcdCmd.Stop(ctx)
+		cancel()
+	}
+
+	// Cancel the context to terminate any remaining processes. Scoped cleanup
+	// also joins each command's context watcher before releasing its leases.
 	if s.cancel != nil {
 		s.cancel()
 	}

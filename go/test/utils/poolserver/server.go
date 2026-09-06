@@ -68,6 +68,13 @@
 //	ALLOC          → PORT <n>   (server records port n; caller may bind immediately)
 //	RETURN <n>     → OK         (test done; server forgets the port)
 //	PING           → PONG
+//	LEASE <id>     → LEASE <n> <id> (reserve for a unique acquisition identity)
+//	RELEASE <n> <id> → OK       (release only that identity; safe to repeat)
+//
+// Identity leases survive client disconnects. Their owner must join its children
+// before release, and quarantine the worker on an ambiguous acknowledgement.
+// Legacy RETURN cannot release an identity lease. Released identities remain as
+// tombstones for the server lifetime so delayed retries cannot free a later lease.
 package poolserver
 
 import (
@@ -86,8 +93,11 @@ type Server struct {
 	socketPath string
 	listener   net.Listener // Unix-socket listener
 
-	mu        sync.Mutex
-	allocated map[int]struct{} // ports handed out and not yet returned
+	mu         sync.Mutex
+	allocated  map[int]struct{} // ports handed out and not yet returned
+	listenPort func() (net.Listener, error)
+	leases     map[int]string // identity leases survive connection loss
+	leaseIDs   map[string]int // zero records an already released identity
 }
 
 // NewServer creates a pool server that listens on socketPath.
@@ -100,8 +110,11 @@ func NewServer(socketPath string) (*Server, error) {
 	}
 	return &Server{
 		socketPath: socketPath,
+		listenPort: func() (net.Listener, error) { return net.Listen("tcp", "localhost:0") },
 		listener:   l,
 		allocated:  make(map[int]struct{}),
+		leases:     make(map[int]string),
+		leaseIDs:   make(map[string]int),
 	}, nil
 }
 
@@ -141,6 +154,8 @@ func (s *Server) handleRequest(request string, clientPorts *[]int) string {
 	}
 
 	switch fields[0] {
+	case "LEASE", "RELEASE":
+		return s.handleLease(fields)
 	case cmdPing:
 		return respPong
 
@@ -159,6 +174,14 @@ func (s *Server) handleRequest(request string, clientPorts *[]int) string {
 		if port, err := strconv.Atoi(fields[1]); err != nil {
 			return respPrefixErr + " invalid port"
 		} else {
+			// A legacy return may only release this connection's legacy port.
+			owned := false
+			for _, p := range *clientPorts {
+				owned = owned || p == port
+			}
+			if !owned {
+				return respPrefixErr + " port not owned by connection"
+			}
 			s.returnPort(port)
 			*clientPorts = removePort(*clientPorts, port)
 			return respOK

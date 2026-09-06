@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/multigres/multigres/go/common/constants"
-	"github.com/multigres/multigres/go/tools/ctxutil"
 	"github.com/multigres/multigres/go/tools/executil"
 )
 
@@ -67,22 +66,13 @@ func BaseTestEnv() []string {
 }
 
 // CommandWithOrphanProtection creates a command wrapped in run_in_test.sh for orphan
-// process protection. The process uses context.Background() for its lifetime, avoiding
-// premature SIGKILL when the monitoring context is cancelled. Instead, Stop() is called
-// when monitorCtx is cancelled, giving run_in_test.sh time to send SIGTERM to its child
-// process before exiting.
+// process protection. Cancellation gives run_in_test.sh five seconds to terminate
+// its child before escalation. The context watcher starts only after a successful
+// Start and can be joined with Cmd.JoinWatcher during explicit owner cleanup.
 //
 // Callers should set any required environment variables (e.g. MULTIGRES_TESTDATA_DIR)
 // on the returned Cmd before calling Start().
 func CommandWithOrphanProtection(monitorCtx context.Context, name string, args ...string) *executil.Cmd {
 	allArgs := append([]string{name}, args...)
-	backgroundCtx := ctxutil.Detach(monitorCtx)
-	cmd := executil.Command(backgroundCtx, "run_in_test.sh", allArgs...)
-	go func() {
-		<-monitorCtx.Done()
-		stopCtx, cancel := context.WithTimeout(backgroundCtx, 5*time.Second)
-		_, _ = cmd.Stop(stopCtx)
-		cancel()
-	}()
-	return cmd
+	return executil.CommandWithGracePeriod(monitorCtx, 5*time.Second, "run_in_test.sh", allArgs...)
 }

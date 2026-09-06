@@ -19,6 +19,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,53 @@ func TestCommand_InheritsEnvironment(t *testing.T) {
 	// Should contain PATH from parent environment
 	if !strings.Contains(string(output), "PATH=") {
 		t.Error("expected inherited PATH environment variable")
+	}
+}
+
+func TestCommand_PreCanceledStart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cmd := Command(ctx, "sh", "-c", "exit 0")
+	if err := cmd.Start(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start() = %v, want context.Canceled", err)
+	}
+	if cmd.Process != nil {
+		t.Fatal("canceled command acquired a process")
+	}
+	if err := cmd.JoinWatcher(context.Background()); err != nil {
+		t.Fatalf("unstarted watcher: %v", err)
+	}
+}
+
+func TestCommand_JoinWatcher(t *testing.T) {
+	for _, cancelRunning := range []bool{false, true} {
+		t.Run(strconv.FormatBool(cancelRunning), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			args := []string{"-c", "exit 0"}
+			if cancelRunning {
+				args = []string{"-c", "exec sleep 60"}
+			}
+			cmd := Command(ctx, "sh", args...)
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			if cancelRunning {
+				cancel()
+			}
+			_ = cmd.Wait()
+			joinCtx, joinCancel := context.WithTimeout(context.Background(), time.Second)
+			defer joinCancel()
+			if err := cmd.JoinWatcher(joinCtx); err != nil {
+				t.Fatal(err)
+			}
+			if !cmd.Exited() {
+				t.Fatal("joined command still appears active")
+			}
+			if err := cmd.JoinWatcher(joinCtx); err != nil {
+				t.Fatalf("repeated join: %v", err)
+			}
+		})
 	}
 }
 

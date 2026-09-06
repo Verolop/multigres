@@ -61,6 +61,7 @@ import (
 
 // SetupConfig holds the configuration for creating a ShardSetup.
 type SetupConfig struct {
+	lifetime                           *Lifetime
 	MultipoolerCount                   int
 	MultiorchCount                     int
 	EnableMultigateway                 bool // Enable multigateway (opt-in, default: false)
@@ -469,7 +470,7 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 
 	// Get context from testing.T and create root span
 	ctx := t.Context()
-	ctx, span := telemetry.Tracer().Start(ctx, "shardsetup/New")
+	_, span := telemetry.Tracer().Start(ctx, "shardsetup/New")
 	defer span.End()
 
 	// Default configuration
@@ -517,26 +518,45 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 		t.Fatalf("PostgreSQL binaries not found, make sure to install PostgreSQL and add it to the PATH")
 	}
 
+	runningCtx := context.Background()
+	if config.lifetime != nil {
+		runningCtx = config.lifetime.Context()
+	}
+	runningCtx, cancel := context.WithCancel(runningCtx)
+	setup := &ShardSetup{
+		runningCtx: runningCtx, cancel: cancel, lifetime: config.lifetime,
+		CellName: config.CellName, Multipoolers: make(map[string]*MultipoolerInstance),
+		MultiorchInstances: make(map[string]*ProcessInstance), MetricsPorts: make(map[string]int),
+	}
+	if config.lifetime != nil {
+		config.lifetime.attach(setup)
+	}
+	complete := false
+	defer func() {
+		if !complete {
+			setup.Cleanup(true)
+		}
+	}()
 	tempDir, tempDirCleanup := testutil.TempDir(t, "shardsetup_test")
-
-	// Create a long-lived context for all processes in this ShardSetup.
-	// This context is cancelled in Cleanup() to gracefully terminate all processes.
-	// Derive from context.Background() rather than the span context to avoid premature cancellation.
-	runningCtx, cancel := context.WithCancel(context.Background())
+	setup.TempDir, setup.TempDirCleanup = tempDir, tempDirCleanup
 
 	// Start etcd for topology
 	t.Logf("Starting etcd for topology...")
 
+	setup.checkBoundary(t, "before-first-child")
 	etcdDataDir := filepath.Join(tempDir, "etcd_data")
 	if err := os.MkdirAll(etcdDataDir, 0o755); err != nil {
 		cancel()
 		t.Fatalf("failed to create etcd data directory: %v", err)
 	}
-	etcdClientAddr, etcdCmd, err := startEtcd(runningCtx, t, etcdDataDir)
+	etcdClientAddr, etcdCmd, err := setup.startEtcd(runningCtx, t, etcdDataDir)
 	if err != nil {
 		cancel()
 		t.Fatalf("failed to start etcd: %v", err)
 	}
+
+	setup.EtcdClientAddr = etcdClientAddr
+	setup.checkBoundary(t, "etcd-ready")
 
 	// Create topology server and cell
 	testRoot := "/multigres"
@@ -548,8 +568,10 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 		t.Fatalf("failed to open topology server: %v", err)
 	}
 
+	setup.TopoServer = ts
+
 	// Create the cell
-	err = ts.CreateCell(context.Background(), config.CellName, &clustermetadatapb.Cell{
+	err = ts.CreateCell(runningCtx, config.CellName, &clustermetadatapb.Cell{
 		ServerAddresses: []string{etcdClientAddr},
 		Root:            cellRoot,
 	})
@@ -605,7 +627,7 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 		t.Fatalf("invalid durability policy %q: %v", config.DurabilityPolicy, err)
 	}
 
-	err = ts.CreateDatabase(context.Background(), config.Database, &clustermetadatapb.Database{
+	err = ts.CreateDatabase(runningCtx, config.Database, &clustermetadatapb.Database{
 		Name:                      config.Database,
 		BackupLocation:            backupLocation,
 		BootstrapDurabilityPolicy: bootstrapPolicy,
@@ -615,21 +637,8 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 		t.Fatalf("failed to create database in topology: %v", err)
 	}
 
-	setup := &ShardSetup{
-		TempDir:            tempDir,
-		TempDirCleanup:     tempDirCleanup,
-		EtcdClientAddr:     etcdClientAddr,
-		EtcdCmd:            etcdCmd,
-		TopoServer:         ts,
-		CellName:           config.CellName,
-		runningCtx:         runningCtx,
-		cancel:             cancel,
-		Multipoolers:       make(map[string]*MultipoolerInstance),
-		MultiorchInstances: make(map[string]*ProcessInstance),
-		MetricsPorts:       make(map[string]int),
-		BackupLocation:     backupLocation,
-		BackupCipherKey:    backupCipherKey,
-	}
+	setup.EtcdClientAddr, setup.EtcdCmd = etcdClientAddr, etcdCmd
+	setup.BackupLocation, setup.BackupCipherKey = backupLocation, backupCipherKey
 
 	// Provision postgres-side TLS assets up front so every pgctld + multipooler
 	// shares the same CA / server cert. Done before the per-pooler loop so the
@@ -642,9 +651,9 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 	var multipoolerInstances []*MultipoolerInstance
 	for i := 0; i < config.MultipoolerCount; i++ {
 		name := multipoolerName(i)
-		grpcPort := utils.GetFreePort(t)
-		pgPort := utils.GetFreePort(t)
-		multipoolerPort := utils.GetFreePort(t)
+		grpcPort := setup.port(t)
+		pgPort := setup.port(t)
+		multipoolerPort := setup.port(t)
 
 		inst := setup.CreateMultipoolerInstance(t, name, grpcPort, pgPort, multipoolerPort)
 		inst.Multipooler.ExtraArgs = append(inst.Multipooler.ExtraArgs, config.MultipoolerExtraArgs...)
@@ -670,7 +679,7 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 
 		// Configure Prometheus metrics export on multipooler if enabled.
 		if config.EnableMetricsExport {
-			metricsPort := utils.GetFreePort(t)
+			metricsPort := setup.port(t)
 			setup.MetricsPorts[name] = metricsPort
 			inst.Multipooler.Environment = append(inst.Multipooler.Environment,
 				"OTEL_METRICS_EXPORTER=prometheus",
@@ -692,6 +701,7 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 	// Start all processes (pgctld, multipooler, pgbackrest) for all nodes
 	// Use setup.ctx for process lifetime, passed ctx only for tracing
 	startMultipoolerInstances(setup.runningCtx, t, multipoolerInstances, config.DeferMultipoolerStart)
+	setup.checkBoundary(t, "database-children-ready")
 
 	// Create multiorch instances (if any requested by the test)
 	setup.createMultiorchInstances(t, config)
@@ -704,14 +714,14 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 		}
 
 		// Allocate ports for multigateway
-		pgPort := utils.GetFreePort(t)
-		httpPort := utils.GetFreePort(t)
-		grpcPort := utils.GetFreePort(t)
+		pgPort := setup.port(t)
+		httpPort := setup.port(t)
+		grpcPort := setup.port(t)
 
 		// Allocate replica port if enabled
 		var replicaPgPort int
 		if config.EnableMultigatewayReplicaPort {
-			replicaPgPort = utils.GetFreePort(t)
+			replicaPgPort = setup.port(t)
 		}
 
 		// Create multigateway instance (doesn't start it)
@@ -733,7 +743,7 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 
 		// Configure Prometheus metrics export if enabled.
 		if config.EnableMetricsExport {
-			metricsPort := utils.GetFreePort(t)
+			metricsPort := setup.port(t)
 			setup.MetricsPorts["multigateway"] = metricsPort
 			mgw.Environment = append(mgw.Environment,
 				"OTEL_METRICS_EXPORTER=prometheus",
@@ -755,8 +765,8 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 	// Multiadmin is a passive observer of topology — order vs. bootstrap
 	// doesn't matter the way it does for multigateway query serving.
 	if config.EnableMultiadmin {
-		httpPort := utils.GetFreePort(t)
-		grpcPort := utils.GetFreePort(t)
+		httpPort := setup.port(t)
+		grpcPort := setup.port(t)
 
 		ma := setup.CreateMultiadminInstance(t, "multiadmin", httpPort, grpcPort)
 		ma.LogLevel = config.LogLevel
@@ -772,11 +782,13 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 	if config.SkipInitialization {
 		t.Logf("Shard setup complete (uninitialized): %d multipoolers, %d multiorchs",
 			config.MultipoolerCount, config.MultiorchCount)
+		setup.checkBoundary(t, "before-transfer")
+		complete = true
 		return setup
 	}
 
 	// Use multiorch to bootstrap the shard organically
-	initializeWithMultiorch(ctx, t, setup, config)
+	initializeWithMultiorch(runningCtx, t, setup, config)
 
 	// Verify multigateway can execute queries (if enabled)
 	if config.EnableMultigateway {
@@ -786,6 +798,8 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 	t.Logf("Shard setup complete: %d multipoolers, %d multiorchs, multigateway: %v",
 		config.MultipoolerCount, config.MultiorchCount, config.EnableMultigateway)
 
+	setup.checkBoundary(t, "before-transfer")
+	complete = true
 	return setup
 }
 
@@ -814,14 +828,16 @@ func (s *ShardSetup) StartMultiorchs(ctx context.Context, t *testing.T) {
 		if err := mo.Start(ctx, t); err != nil {
 			t.Fatalf("StartMultiorchs: failed to start multiorch %s: %v", name, err)
 		}
-		t.Cleanup(mo.CleanupFunc(t.Logf))
+		if s.lifetime == nil {
+			t.Cleanup(mo.CleanupFunc(t.Logf))
+		}
 
 		// Register cleanup to ensure recovery is always enabled
 		// This prevents test failures from leaving recovery disabled
 		moInstance := mo // Capture for closure
-		t.Cleanup(func() {
-			ensureRecoveryEnabled(t, moInstance)
-		})
+		if s.lifetime == nil {
+			t.Cleanup(func() { ensureRecoveryEnabled(t, moInstance) })
+		}
 
 		t.Logf("StartMultiorchs: Started multiorch '%s': gRPC=%d, HTTP=%d", name, mo.GrpcPort, mo.HttpPort)
 	}
@@ -1490,7 +1506,7 @@ func startMultipoolerInstances(ctx context.Context, t *testing.T, instances []*M
 // startEtcd starts etcd without registering t.Cleanup() handlers
 // since cleanup is handled manually by TestMain via Cleanup().
 // Follows the pattern from multipooler/setup_test.go:startEtcdForSharedSetup.
-func startEtcd(ctx context.Context, t *testing.T, dataDir string) (string, *executil.Cmd, error) {
+func (s *ShardSetup) startEtcd(ctx context.Context, t *testing.T, dataDir string) (string, *executil.Cmd, error) {
 	t.Helper()
 
 	ctx, span := telemetry.Tracer().Start(ctx, "shardsetup/startEtcd")
@@ -1505,9 +1521,9 @@ func startEtcd(ctx context.Context, t *testing.T, dataDir string) (string, *exec
 	}
 
 	// Get ports for etcd (client, peer, and metrics)
-	clientPort := utils.GetFreePort(t)
-	peerPort := utils.GetFreePort(t)
-	metricsPort := utils.GetFreePort(t)
+	clientPort := s.port(t)
+	peerPort := s.port(t)
+	metricsPort := s.port(t)
 
 	span.SetAttributes(
 		attribute.Int("etcd.client_port", clientPort),
@@ -1536,6 +1552,11 @@ func startEtcd(ctx context.Context, t *testing.T, dataDir string) (string, *exec
 	// Set MULTIGRES_TESTDATA_DIR for directory-deletion triggered cleanup
 	cmd.AddEnv("MULTIGRES_TESTDATA_DIR=" + dataDir)
 
+	s.EtcdCmd = cmd
+	if s.lifetime != nil {
+		s.lifetime.ownCommand(cmd)
+	}
+	s.checkBoundary(t, "ports-allocated")
 	if err := cmd.Start(); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to start etcd")

@@ -119,6 +119,7 @@ type Cmd struct {
 	terminated    chan struct{} // Closed when Terminate() is called
 	waitDone      chan struct{} // Closed when Wait() completes
 	waitErr       error         // Result of Wait() (valid after waitDone closed)
+	watchDone     chan struct{}
 	waitOnce      sync.Once
 }
 
@@ -149,6 +150,7 @@ func CommandWithGracePeriod(ctx context.Context, gracePeriod time.Duration, name
 		defaultGracePeriod: gracePeriod,
 		terminated:         make(chan struct{}),
 		waitDone:           make(chan struct{}),
+		watchDone:          make(chan struct{}),
 	}
 }
 
@@ -258,6 +260,7 @@ func (c *Cmd) finalizeEnv() {
 func (c *Cmd) watchContext() {
 	// Watch for parent context cancellation
 	go func() {
+		defer close(c.watchDone)
 		select {
 		case <-c.parentCtx.Done():
 			// Parent context cancelled - terminate with default grace period.
@@ -287,6 +290,9 @@ func (c *Cmd) watchContext() {
 // Note: WithClientSpan() has no effect on Start() since the span cannot be
 // ended until Wait() is called. Use Run() for client span support.
 func (c *Cmd) Start() error {
+	if err := c.parentCtx.Err(); err != nil {
+		return err
+	}
 	c.finalizeEnv()
 	if c.processGroup {
 		if c.Cmd.SysProcAttr == nil {
@@ -341,7 +347,7 @@ func (c *Cmd) Terminate(ctx context.Context) (error, bool) {
 	// Send SIGTERM only once
 	c.terminateOnce.Do(func() {
 		close(c.terminated)
-		if c.Process != nil {
+		if c.Process != nil && !c.Exited() {
 			if c.processGroup {
 				_ = syscall.Kill(-c.Process.Pid, syscall.SIGTERM)
 			} else {
@@ -373,8 +379,8 @@ func (c *Cmd) Terminate(ctx context.Context) (error, bool) {
 //
 // Safe to call after Terminate() times out - reuses the same Wait() call.
 func (c *Cmd) Kill(ctx context.Context) (error, bool) {
-	// Send SIGKILL
-	if c.Process != nil {
+	// Send SIGKILL only while this direct child still owns its PID.
+	if c.Process != nil && !c.Exited() {
 		if c.processGroup {
 			_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
 		} else {
@@ -525,4 +531,27 @@ func (c *Cmd) CombinedOutput() ([]byte, error) {
 		err = c.Wait()
 	}
 	return buf.Bytes(), err
+}
+
+// JoinWatcher waits for the context observer after the started process has joined.
+func (c *Cmd) JoinWatcher(ctx context.Context) error {
+	if c.Process == nil {
+		return nil
+	}
+	select {
+	case <-c.watchDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Exited reports whether Wait has completed, synchronizing ProcessState reads.
+func (c *Cmd) Exited() bool {
+	select {
+	case <-c.waitDone:
+		return true
+	default:
+		return false
+	}
 }

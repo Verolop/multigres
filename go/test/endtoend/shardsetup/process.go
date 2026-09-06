@@ -42,6 +42,7 @@ import (
 // ProcessInstance represents a process instance for testing (pgctld, multipooler, or multiorch).
 // This struct is extracted from multipooler/setup_test.go and extended for multiorch support.
 type ProcessInstance struct {
+	lifetime    *Lifetime
 	Name        string
 	PoolerDir   string // Used by pgctld, multipooler
 	ConfigFile  string // Used by pgctld
@@ -269,7 +270,7 @@ func (p *ProcessInstance) startPgctld(ctx context.Context, t *testing.T) error {
 
 	args := buildPgctldServerArgs(p)
 
-	p.Process = executil.Command(ctx, p.Binary, args...).WithProcessGroup()
+	p.Process = p.command(ctx, args...)
 
 	// Set MULTIGRES_TESTDATA_DIR for directory-deletion triggered cleanup
 	if len(p.Environment) > 0 {
@@ -296,7 +297,7 @@ func (p *ProcessInstance) startMultipooler(ctx context.Context, t *testing.T) er
 	args := p.multipoolerArgs()
 
 	// Start the multipooler server
-	p.Process = executil.Command(ctx, p.Binary, args...).WithProcessGroup()
+	p.Process = p.command(ctx, args...)
 
 	// Set MULTIGRES_TESTDATA_DIR for directory-deletion triggered cleanup
 	if len(p.Environment) > 0 {
@@ -351,7 +352,7 @@ func (p *ProcessInstance) startMultiorch(ctx context.Context, t *testing.T) erro
 		args = append(args, "--verify-replication-timeout", "15s")
 	}
 
-	p.Process = executil.Command(ctx, p.Binary, args...).WithProcessGroup()
+	p.Process = p.command(ctx, args...)
 	if p.PoolerDir != "" {
 		p.Process.SetDir(p.PoolerDir)
 	}
@@ -362,6 +363,7 @@ func (p *ProcessInstance) startMultiorch(ctx context.Context, t *testing.T) erro
 		if err != nil {
 			return fmt.Errorf("failed to create log file: %w", err)
 		}
+		defer logF.Close()
 		p.Process.SetStdout(logF)
 		p.Process.SetStderr(logF)
 	}
@@ -415,7 +417,7 @@ func (p *ProcessInstance) startMultigateway(ctx context.Context, t *testing.T) e
 	// Append any extra args (e.g., buffer configuration flags)
 	args = append(args, p.ExtraArgs...)
 
-	p.Process = executil.Command(ctx, p.Binary, args...).WithProcessGroup()
+	p.Process = p.command(ctx, args...)
 
 	// Set MULTIGRES_TESTDATA_DIR for directory-deletion triggered cleanup
 	if len(p.Environment) > 0 {
@@ -429,6 +431,7 @@ func (p *ProcessInstance) startMultigateway(ctx context.Context, t *testing.T) e
 		if err != nil {
 			return fmt.Errorf("failed to create log file: %w", err)
 		}
+		defer logF.Close()
 		p.Process.SetStdout(logF)
 		p.Process.SetStderr(logF)
 	}
@@ -468,7 +471,7 @@ func (p *ProcessInstance) startMultiadmin(ctx context.Context, t *testing.T) err
 		"--log-level", p.logLevelOrDefault(),
 	}
 
-	p.Process = executil.Command(ctx, p.Binary, args...).WithProcessGroup()
+	p.Process = p.command(ctx, args...)
 
 	if len(p.Environment) > 0 {
 		p.Process.SetEnv(p.Environment)
@@ -479,6 +482,7 @@ func (p *ProcessInstance) startMultiadmin(ctx context.Context, t *testing.T) err
 		if err != nil {
 			return fmt.Errorf("failed to create log file: %w", err)
 		}
+		defer logF.Close()
 		p.Process.SetStdout(logF)
 		p.Process.SetStderr(logF)
 	}
@@ -513,7 +517,7 @@ func (p *ProcessInstance) waitForStartup(ctx context.Context, t *testing.T, time
 	time.Sleep(500 * time.Millisecond)
 
 	// Check if process died immediately
-	if p.Process.ProcessState != nil {
+	if p.Process.Exited() {
 		t.Logf("%s process died immediately: exit code %d", p.Name, p.Process.ProcessState.ExitCode())
 		p.LogRecentOutput(t, "Process died immediately")
 		return fmt.Errorf("%s process died immediately: exit code %d", p.Name, p.Process.ProcessState.ExitCode())
@@ -524,7 +528,7 @@ func (p *ProcessInstance) waitForStartup(ctx context.Context, t *testing.T, time
 	connectAttempts := 0
 	for time.Now().Before(deadline) {
 		// Check if process died during startup
-		if p.Process.ProcessState != nil {
+		if p.Process.Exited() {
 			t.Logf("%s process died during startup: exit code %d", p.Name, p.Process.ProcessState.ExitCode())
 			p.LogRecentOutput(t, "Process died during startup")
 			return fmt.Errorf("%s process died: exit code %d", p.Name, p.Process.ProcessState.ExitCode())
@@ -545,7 +549,7 @@ func (p *ProcessInstance) waitForStartup(ctx context.Context, t *testing.T, time
 	}
 
 	// If we timed out, try to get process status
-	if p.Process.ProcessState == nil {
+	if !p.Process.Exited() {
 		t.Logf("%s process is still running but not responding on gRPC port %d", p.Name, p.GrpcPort)
 	}
 
@@ -585,7 +589,7 @@ func (p *ProcessInstance) IsRunning() bool {
 		return false
 	}
 	// ProcessState is set after Wait() returns, meaning process has exited
-	if p.Process.ProcessState != nil {
+	if p.Process.Exited() {
 		return false
 	}
 	// Signal 0 checks if process exists without actually sending a signal
@@ -694,4 +698,14 @@ func WaitForPortReady(t *testing.T, name string, grpcPort int, timeout time.Dura
 	}
 
 	return fmt.Errorf("timeout: %s failed to start listening on port %d after %d attempts", name, grpcPort, connectAttempts)
+}
+
+func (p *ProcessInstance) command(ctx context.Context, args ...string) *executil.Cmd {
+	cmd := executil.Command(ctx, p.Binary, args...)
+	if p.lifetime != nil {
+		p.lifetime.ownCommand(cmd)
+	} else {
+		cmd.WithProcessGroup()
+	}
+	return cmd
 }

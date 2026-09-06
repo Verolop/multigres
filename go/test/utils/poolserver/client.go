@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Client is a connection to a running pool server.
@@ -100,8 +101,8 @@ func (c *Client) Ping() error {
 }
 
 // Close closes the connection to the server.
-// The server will automatically clean up any ports still held for this
-// connection.
+// The server reclaims legacy ALLOC reservations for this connection. Identity
+// leases survive disconnect and must be explicitly released after joined cleanup.
 func (c *Client) Close() error {
 	return c.conn.Close()
 }
@@ -109,6 +110,9 @@ func (c *Client) Close() error {
 func (c *Client) send(msg string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return "", err
+	}
 	if _, err := fmt.Fprintln(c.writer, msg); err != nil {
 		return "", fmt.Errorf("send %q: %w", msg, err)
 	}
