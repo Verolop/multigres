@@ -12724,12 +12724,12 @@ AlterMigrationStmt:
 migration_action:
 		PHASE IMPORT_P opt_when_clause opt_definition
 			{
-				when, _ := $3.(*ast.A_Expr)
+				when := $3
 				$$ = &ast.MigrationActionSpec{Direction: ast.MigrationDirectionImport, When: when, Options: $4}
 			}
 	|	PHASE EXPORT opt_when_clause opt_definition
 			{
-				when, _ := $3.(*ast.A_Expr)
+				when := $3
 				$$ = &ast.MigrationActionSpec{Direction: ast.MigrationDirectionExport, When: when, Options: $4}
 			}
 	;
@@ -12761,7 +12761,7 @@ migration_drop_behavior:
 			{ $$ = &ast.MigrationDropBehavior{Force: true, Options: $2} }
 	|	opt_when_clause opt_definition
 			{
-				when, _ := $1.(*ast.A_Expr)
+				when := $1
 				$$ = &ast.MigrationDropBehavior{When: when, Options: $2}
 			}
 	;

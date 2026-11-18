@@ -292,7 +292,7 @@ func (d MigrationDirection) String() string {
 // for future reintroduction but are not currently implemented.
 type MigrationActionSpec struct {
 	Direction MigrationDirection
-	When      *A_Expr   // WHEN (field OP constant); nil if omitted
+	When      Node      // WHEN expression; nil only if omitted
 	Options   *NodeList // *DefElem list; may be nil
 }
 
@@ -303,7 +303,7 @@ type AlterMigrationStmt struct {
 	Name      string
 	IfExists  bool
 	Direction MigrationDirection
-	When      *A_Expr   // WHEN (field OP constant); nil if omitted
+	When      Node      // WHEN expression; nil only if omitted
 	Options   *NodeList // *DefElem list; may be nil
 }
 
@@ -353,7 +353,7 @@ func (n *AlterMigrationStmt) SqlString() string {
 // Not an AST Node; a grammar-only value type.
 type MigrationDropBehavior struct {
 	Force   bool
-	When    *A_Expr   // WHEN (field OP constant); nil if omitted, defaults to requiring the migration already caught up
+	When    Node      // WHEN expression; nil only if omitted
 	Options *NodeList // WITH (...) options, a DefElem list; may be nil
 }
 
@@ -364,7 +364,7 @@ type DropMigrationStmt struct {
 	Names    *NodeList // *String list
 	IfExists bool
 	Force    bool
-	When     *A_Expr   // WHEN (field OP constant); nil if omitted, defaults to requiring the migration already caught up
+	When     Node      // WHEN expression; nil only if omitted
 	Options  *NodeList // WITH (...) options, a DefElem list; may be nil
 }
 

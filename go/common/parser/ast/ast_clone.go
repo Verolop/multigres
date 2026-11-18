@@ -875,7 +875,7 @@ func CloneRefOfAlterMigrationStmt(n *AlterMigrationStmt) *AlterMigrationStmt {
 	}
 	out := *n
 	out.BaseNode = CloneBaseNode(n.BaseNode)
-	out.When = CloneRefOfA_Expr(n.When)
+	out.When = CloneNode(n.When)
 	out.Options = CloneRefOfNodeList(n.Options)
 	return &out
 }
@@ -2115,7 +2115,7 @@ func CloneRefOfDropMigrationStmt(n *DropMigrationStmt) *DropMigrationStmt {
 	out := *n
 	out.BaseNode = CloneBaseNode(n.BaseNode)
 	out.Names = CloneRefOfNodeList(n.Names)
-	out.When = CloneRefOfA_Expr(n.When)
+	out.When = CloneNode(n.When)
 	out.Options = CloneRefOfNodeList(n.Options)
 	return &out
 }

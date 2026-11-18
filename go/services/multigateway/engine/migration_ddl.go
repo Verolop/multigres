@@ -542,8 +542,9 @@ func isStatMigrationColumn(name string) bool {
 // migrationCondParts unpacks a WHEN (cond) expression into its field name,
 // operator, and constant value; ok is false for anything other than a simple
 // ColumnRef compared to a constant.
-func migrationCondParts(cond *ast.A_Expr) (field, op string, value ast.Node, ok bool) {
-	if cond == nil || cond.Kind != ast.AEXPR_OP || cond.Name == nil || len(cond.Name.Items) != 1 {
+func migrationCondParts(node ast.Node) (field, op string, value ast.Node, ok bool) {
+	cond, isExpr := node.(*ast.A_Expr)
+	if !isExpr || cond.Kind != ast.AEXPR_OP || cond.Name == nil || len(cond.Name.Items) != 1 {
 		return "", "", nil, false
 	}
 	opName, isStr := cond.Name.Items[0].(*ast.String)

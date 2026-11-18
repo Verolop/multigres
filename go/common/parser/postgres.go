@@ -42003,7 +42003,7 @@ yydefault:
 		var yyLOCAL *ast.MigrationActionSpec
 //line postgres.y:12726
 		{
-			when, _ := yyDollar[3].nodeUnion().(*ast.A_Expr)
+			when := yyDollar[3].nodeUnion()
 			yyLOCAL = &ast.MigrationActionSpec{Direction: ast.MigrationDirectionImport, When: when, Options: yyDollar[4].listUnion()}
 		}
 		yyVAL.union = yyLOCAL
@@ -42012,7 +42012,7 @@ yydefault:
 		var yyLOCAL *ast.MigrationActionSpec
 //line postgres.y:12731
 		{
-			when, _ := yyDollar[3].nodeUnion().(*ast.A_Expr)
+			when := yyDollar[3].nodeUnion()
 			yyLOCAL = &ast.MigrationActionSpec{Direction: ast.MigrationDirectionExport, When: when, Options: yyDollar[4].listUnion()}
 		}
 		yyVAL.union = yyLOCAL
@@ -42061,7 +42061,7 @@ yydefault:
 		var yyLOCAL *ast.MigrationDropBehavior
 //line postgres.y:12763
 		{
-			when, _ := yyDollar[1].nodeUnion().(*ast.A_Expr)
+			when := yyDollar[1].nodeUnion()
 			yyLOCAL = &ast.MigrationDropBehavior{When: when, Options: yyDollar[2].listUnion()}
 		}
 		yyVAL.union = yyLOCAL

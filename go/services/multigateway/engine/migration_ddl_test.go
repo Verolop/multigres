@@ -505,10 +505,18 @@ func TestMigrationDDL_WhenRejectsNonComparisonShapes(t *testing.T) {
 		"ALTER MIGRATION m PHASE EXPORT WHEN (lag_bytes + 5)",         // not a comparison
 		"ALTER MIGRATION m PHASE EXPORT WHEN (1 = 2)",                 // no field on the left
 		"ALTER MIGRATION m PHASE EXPORT WHEN (lag_bytes = lag_bytes)", // no constant on the right
+		"ALTER MIGRATION m PHASE EXPORT WHEN (false)",
+		"ALTER MIGRATION m PHASE IMPORT WHEN (true)",
+		"ALTER MIGRATION m PHASE EXPORT WHEN (lag_bytes < 10 AND false)",
+		"DROP MIGRATION m WHEN (false)",
+		"DROP MIGRATION m WHEN (lag_bytes = 0 OR true)",
+		"DROP MIGRATION m WHEN (NOT (lag_bytes = 0))",
 	} {
-		_, err := runSQL(t, backend, sql)
-		require.Error(t, err, "sql: %s", sql)
-		assert.Equal(t, "0A000", mterrors.ExtractSQLSTATE(err), "sql: %s", sql)
+		t.Run(sql, func(t *testing.T) {
+			_, err := runSQL(t, backend, sql)
+			require.Error(t, err, "sql: %s", sql)
+			assert.Equal(t, "0A000", mterrors.ExtractSQLSTATE(err), "sql: %s", sql)
+		})
 	}
 }
 

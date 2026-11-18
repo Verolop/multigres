@@ -1460,8 +1460,8 @@ func (a *application) rewriteRefOfAlterMigrationStmt(parent Node, node *AlterMig
 			return true
 		}
 	}
-	if !a.rewriteRefOfA_Expr(node, node.When, func(newNode, parent Node) {
-		parent.(*AlterMigrationStmt).When = newNode.(*A_Expr)
+	if !a.rewriteNode(node, node.When, func(newNode, parent Node) {
+		parent.(*AlterMigrationStmt).When = newNode.(Node)
 	}) {
 		return false
 	}
@@ -5532,8 +5532,8 @@ func (a *application) rewriteRefOfDropMigrationStmt(parent Node, node *DropMigra
 	}) {
 		return false
 	}
-	if !a.rewriteRefOfA_Expr(node, node.When, func(newNode, parent Node) {
-		parent.(*DropMigrationStmt).When = newNode.(*A_Expr)
+	if !a.rewriteNode(node, node.When, func(newNode, parent Node) {
+		parent.(*DropMigrationStmt).When = newNode.(Node)
 	}) {
 		return false
 	}

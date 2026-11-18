@@ -37,8 +37,10 @@ func parseOne(t *testing.T, sql string) ast.Stmt {
 // clause's *ast.A_Expr (migration_cond's grammar action: ColId
 // migration_cond_op def_arg), failing the test if cond isn't that exact
 // shape.
-func condFieldOp(t *testing.T, cond *ast.A_Expr) (field, op string) {
+func condFieldOp(t *testing.T, node ast.Node) (field, op string) {
 	t.Helper()
+	cond, ok := node.(*ast.A_Expr)
+	require.True(t, ok, "WHEN clause is an A_Expr")
 	require.NotNil(t, cond)
 	cr, ok := cond.Lexpr.(*ast.ColumnRef)
 	require.True(t, ok, "WHEN clause field is a ColumnRef")
@@ -222,18 +224,16 @@ func TestParseAlterMigrationWhenAcceptsFullExpression(t *testing.T) {
 	// the parser doesn't reject it; the operator name is simply not one of
 	// the six comparison operators the gateway's runtime check looks for.
 	notAComparison := parseOne(t, "ALTER MIGRATION m PHASE EXPORT WHEN (lag_bytes + 5)").(*ast.AlterMigrationStmt)
-	require.NotNil(t, notAComparison.When)
-	require.Len(t, notAComparison.When.Name.Items, 1)
-	opName, ok := notAComparison.When.Name.Items[0].(*ast.String)
-	require.True(t, ok)
-	assert.Equal(t, "+", opName.SVal)
+	_, op := condFieldOp(t, notAComparison.When)
+	assert.Equal(t, "+", op)
 
 	// A literal-vs-literal comparison also parses: there's no field on the
 	// left for the gateway's runtime check to resolve against
 	// multigres.stat_migration's columns.
 	notAColumn := parseOne(t, "ALTER MIGRATION m PHASE EXPORT WHEN (1 = 2)").(*ast.AlterMigrationStmt)
-	require.NotNil(t, notAColumn.When)
-	_, isColumnRef := notAColumn.When.Lexpr.(*ast.ColumnRef)
+	cond, ok := notAColumn.When.(*ast.A_Expr)
+	require.True(t, ok)
+	_, isColumnRef := cond.Lexpr.(*ast.ColumnRef)
 	assert.False(t, isColumnRef, "a literal-vs-literal comparison has no field to check")
 }
 
