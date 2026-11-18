@@ -117,6 +117,10 @@ func TestFixReplication(t *testing.T) {
 	require.NoError(t, err, "should be able to query replica")
 	require.Equal(t, "0", string(result.Rows[0].Values[0]), "data should NOT be visible on replica while replication is broken")
 
+	// Release the manual stop without configuring primary_conninfo; recovery must repair it.
+	_, err = replicaClient.Manager.StartReplication(t.Context(), &multipoolermanagerdatapb.StartReplicationRequest{})
+	require.NoError(t, err, "should release the manual replication stop")
+
 	// NOW start multiorch - it should detect and fix the broken replication
 	t.Log("Starting multiorch to detect and fix replication...")
 	setup.StartMultiorchs(t.Context(), t)
@@ -169,6 +173,8 @@ func TestFixReplication(t *testing.T) {
 	require.NoError(t, err, "should be able to query replica")
 	require.Equal(t, "0", string(result.Rows[0].Values[0]), "new data should NOT be visible on replica while replication is broken")
 
+	_, err = replicaClient.Manager.StartReplication(t.Context(), &multipoolermanagerdatapb.StartReplicationRequest{})
+	require.NoError(t, err, "should release the manual replication stop")
 	enableRecovery()
 
 	// Trigger recovery to detect and fix the broken replication
@@ -318,14 +324,13 @@ func breakReplication(t *testing.T, client *shardsetup.MultipoolerClient, inst *
 
 	ctx := utils.WithTimeout(t, 10*time.Second)
 
-	// Clear primary_conninfo directly. The pooler-side RPCs (SetPrimary,
-	// SetPrimaryConnInfo) all set the value rather than clearing it, so the
-	// only way to break replication from a test is to reset the GUC.
-	_, err := client.Pooler.ExecuteQuery(ctx, "ALTER SYSTEM RESET primary_conninfo", 0)
-	require.NoError(t, err, "ALTER SYSTEM RESET primary_conninfo should succeed")
-	_, err = client.Pooler.ExecuteQuery(ctx, "SELECT pg_reload_conf()", 1)
-	require.NoError(t, err, "pg_reload_conf should succeed")
-	t.Log("Cleared primary_conninfo via SQL")
+	// Hold the fault against the pooler's monitor as well as multiorch recovery.
+	_, err := client.Manager.StopReplication(ctx, &multipoolermanagerdatapb.StopReplicationRequest{
+		Mode: multipoolermanagerdatapb.ReplicationPauseMode_REPLICATION_PAUSE_MODE_RECEIVER_ONLY,
+		Wait: true,
+	})
+	require.NoError(t, err, "StopReplication should succeed")
+	t.Log("Cleared primary_conninfo via StopReplication")
 
 	waitForReplicationBroken(t, inst, 10*time.Second)
 }
