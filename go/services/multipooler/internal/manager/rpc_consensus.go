@@ -328,7 +328,10 @@ func (pm *MultipoolerManager) Recruit(ctx context.Context, req *consensusdatapb.
 
 	// Step 5: Return ConsensusStatus with the stable post-revoke position.
 	// Uses the cached position warmed by the getConsensusStatus call in step 3.
-	return &consensusdatapb.RecruitResponse{ConsensusStatus: pm.consensusMgr.CachedConsensusStatus()}, nil
+	return &consensusdatapb.RecruitResponse{
+		ConsensusStatus:    pm.consensusMgr.CachedConsensusStatus(),
+		AvailabilityStatus: pm.buildAvailabilityStatus(),
+	}, nil
 }
 
 // recruitDrainTimeout is the drain window when recruiting a primary.

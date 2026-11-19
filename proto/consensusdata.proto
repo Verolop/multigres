@@ -67,6 +67,8 @@ message RecruitRequest {
 // promotion candidate.
 message RecruitResponse {
   clustermetadata.ConsensusStatus consensus_status = 1;
+  // Availability after recruitment, which may have changed since discovery.
+  clustermetadata.AvailabilityStatus availability_status = 2;
 }
 
 // PromoteRequest carries the coordinator's complete proposal for a new shard

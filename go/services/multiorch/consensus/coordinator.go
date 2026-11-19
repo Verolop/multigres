@@ -20,6 +20,7 @@ import (
 	"math/rand/v2"
 	"sync"
 
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonconsensus "github.com/multigres/multigres/go/common/consensus"
@@ -139,7 +140,15 @@ func (c *Coordinator) runFailover(ctx context.Context, cohort []*multiorchdatapb
 	checkProposalPossible := func(rev *clustermetadatapb.TermRevocation, statuses []*clustermetadatapb.ConsensusStatus) error {
 		return commonconsensus.CheckProposalPossible(rev, statuses, buildProposal)
 	}
-	if err := c.newRuleChange(reason, tryBuildProposal, checkProposalPossible).Run(ctx, cohort, revocation); err != nil {
+	ruleChange := c.newRuleChange(reason, tryBuildProposal, checkProposalPossible)
+	ruleChange.onRecruited = func(p *multiorchdatapb.PoolerHealthState, availability *clustermetadatapb.AvailabilityStatus) {
+		// SwitchPrimary can resign while Recruit waits for its action lock.
+		// Use that fresh signal without mutating the shared discovery snapshot.
+		updated := proto.Clone(p).(*multiorchdatapb.PoolerHealthState)
+		updated.AvailabilityStatus = availability
+		healthByID[topoclient.ClusterIDString(p.GetMultipooler().GetId())] = updated
+	}
+	if err := ruleChange.Run(ctx, cohort, revocation); err != nil {
 		if len(ineligible) > 0 {
 			return mterrors.Wrapf(err, "failover excluded ineligible members %v", ineligible)
 		}

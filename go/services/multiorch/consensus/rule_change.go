@@ -42,6 +42,8 @@ type coordinatorLedRuleChange struct {
 	reason                string
 	tryBuildProposal      func(*clustermetadatapb.TermRevocation, []*clustermetadatapb.ConsensusStatus) (*consensusdatapb.CoordinatorProposal, error)
 	checkProposalPossible func(*clustermetadatapb.TermRevocation, []*clustermetadatapb.ConsensusStatus) error
+	// onRecruited runs on the collector, before proposal selection, never on RPC goroutines.
+	onRecruited func(*multiorchdatapb.PoolerHealthState, *clustermetadatapb.AvailabilityStatus)
 }
 
 func (c *Coordinator) newRuleChange(
@@ -210,8 +212,9 @@ func (r *coordinatorLedRuleChange) Run(
 }
 
 type recruitResult struct {
-	pooler *multiorchdatapb.PoolerHealthState
-	cs     *clustermetadatapb.ConsensusStatus // nil if recruit failed
+	pooler       *multiorchdatapb.PoolerHealthState
+	cs           *clustermetadatapb.ConsensusStatus // nil if recruit failed
+	availability *clustermetadatapb.AvailabilityStatus
 }
 
 // dispatchRecruit issues Recruit RPCs to all cohort members concurrently and
@@ -222,7 +225,8 @@ func (r *coordinatorLedRuleChange) dispatchRecruit(ctx context.Context, cohort [
 	recruited := make(chan recruitResult, len(cohort))
 	for _, p := range cohort {
 		go func() {
-			recruited <- recruitResult{pooler: p, cs: r.recruit(ctx, p, revocation)}
+			resp := r.recruit(ctx, p, revocation)
+			recruited <- recruitResult{pooler: p, cs: resp.GetConsensusStatus(), availability: resp.GetAvailabilityStatus()}
 		}()
 	}
 	return recruited
@@ -241,6 +245,9 @@ func (r *coordinatorLedRuleChange) collectRecruitsAndBuildProposal(cohort []*mul
 		rr := <-recruited
 		if rr.cs == nil {
 			continue
+		}
+		if r.onRecruited != nil && rr.availability != nil {
+			r.onRecruited(rr.pooler, rr.availability)
 		}
 		statuses = append(statuses, rr.cs)
 		p, err = r.tryBuildProposal(revocation, statuses)
@@ -315,12 +322,12 @@ func (r *coordinatorLedRuleChange) waitForPromotes(ctx context.Context, cohort [
 }
 
 // recruit issues a Recruit RPC to a single pooler and returns the resulting
-// ConsensusStatus, or nil if the call failed or returned an empty status.
+// response, or nil if the call failed or returned an empty consensus status.
 func (r *coordinatorLedRuleChange) recruit(
 	ctx context.Context,
 	p *multiorchdatapb.PoolerHealthState,
 	revocation *clustermetadatapb.TermRevocation,
-) *clustermetadatapb.ConsensusStatus {
+) *consensusdatapb.RecruitResponse {
 	resp, err := r.coordinator.rpcClient.Recruit(ctx, p.Multipooler, &consensusdatapb.RecruitRequest{
 		TermRevocation: revocation,
 	})
@@ -338,7 +345,7 @@ func (r *coordinatorLedRuleChange) recruit(
 		r.coordinator.logger.InfoContext(ctx, "recruited pooler",
 			"pooler", p.Multipooler.Id.Name,
 			"lsn", cs.GetCurrentPosition().GetLsn())
-		return cs
+		return resp
 	}
 }
 
