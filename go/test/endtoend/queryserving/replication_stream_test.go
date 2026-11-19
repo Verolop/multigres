@@ -15,9 +15,11 @@
 package queryserving
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,20 +83,34 @@ func TestMultigateway_LogicalReplicationStream(t *testing.T) {
 		"START_REPLICATION SLOT %s LOGICAL 0/0 (proto_version '2', publication_names '%s')", slot, pub))
 	require.NoError(t, err)
 
-	_, err = db.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (id, v) VALUES (1, 'hello')", table))
+	// Cross several 64 KiB tunnel buffers with nonidentical contents so lost,
+	// reordered or overwritten chunks cannot pass as they could with one frame.
+	var value strings.Builder
+	value.WriteString("hello:")
+	for i := range 32768 {
+		fmt.Fprintf(&value, "%08x", i)
+	}
+	payload := []byte(value.String())
+	_, err = db.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (id, v) VALUES (1, $1)", table), string(payload))
 	require.NoError(t, err)
 
-	// The insert arrives as an XLogData ('w') frame; keepalives ('k') and
-	// notices may come first.
+	// A first XLogData frame may contain only BEGIN or relation metadata.
+	// Reassemble WAL data until the entire inserted value arrives unchanged.
+	const xlogDataHeaderLen = 1 + 8 + 8 + 8 // tag, WAL start/end, server time
+	var wal []byte
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		require.True(t, time.Now().Before(deadline), "no XLogData frame through the gateway")
+		require.True(t, time.Now().Before(deadline), "full replication payload did not arrive unchanged")
 		rctx, cancel := context.WithDeadline(ctx, deadline)
 		msg, err := conn.ReadReplicationMessage(rctx)
 		cancel()
 		require.NoError(t, err)
 		if msg.Notice == nil && len(msg.Data) > 0 && msg.Data[0] == 'w' {
-			return
+			require.GreaterOrEqual(t, len(msg.Data), xlogDataHeaderLen, "truncated XLogData frame")
+			wal = append(wal, msg.Data[xlogDataHeaderLen:]...)
+			if bytes.Contains(wal, payload) {
+				return
+			}
 		}
 	}
 }
