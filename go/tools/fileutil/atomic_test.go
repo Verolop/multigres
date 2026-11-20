@@ -15,6 +15,7 @@
 package fileutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,5 +47,37 @@ func TestAtomicWriteFileReplacesExistingMode(t *testing.T) {
 	}
 	if got := string(content); got != "new" {
 		t.Errorf("content = %q, want %q", got, "new")
+	}
+}
+
+func TestAtomicWriteFileReportsDirectorySyncFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promises")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("create existing file: %v", err)
+	}
+	// Write and search permission allow replacement, but opening the directory
+	// for syncing requires read permission. The new content is visible even
+	// though AtomicWriteFile cannot confirm its durability.
+	if err := os.Chmod(dir, 0o300); err != nil {
+		t.Fatalf("set directory permissions: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Errorf("restore directory permissions: %v", err)
+		}
+	})
+	if err := AtomicWriteFile(path, []byte("new"), 0o600); !errors.Is(err, os.ErrPermission) {
+		t.Errorf("AtomicWriteFile() error = %v, want permission error", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read replaced file: %v", err)
+	}
+	if got := string(content); got != "new" {
+		t.Errorf("content = %q, want new content despite sync failure", got)
 	}
 }
