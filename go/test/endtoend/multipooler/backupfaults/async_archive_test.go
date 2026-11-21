@@ -46,7 +46,7 @@ import (
 //     action.
 //  3. Restore and replay: a fresh pooler restores from the bootstrap backup
 //     and replays every archived segment, including the one that was
-//     retried, through async archive-get.
+//     retried, with async archive-get enabled.
 func TestAsyncWALArchive_PushRetryAndArchiveReplay(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping end-to-end tests in short mode")
@@ -159,10 +159,18 @@ func TestAsyncWALArchive_PushRetryAndArchiveReplay(t *testing.T) {
 		return n == 3
 	}, 120*time.Second, 1*time.Second, "restored pooler should replay every archived segment")
 
-	requireLogLine(t, filepath.Join(restored.Pgctld.PoolerDir, "pg_data", "postgresql.log"),
-		fmt.Sprintf("found %s in the archive asynchronously", seg2),
-		"the retried segment must have been replayed through async archive-get")
-	t.Logf("%s replayed the archive, including retried segment %s, through async archive-get", restoredName, seg2)
+	// Async archive-get may fetch a queue miss synchronously when another
+	// request owns the prefetch lock. Verify the requested mode and replay,
+	// rather than requiring this particular segment to win the prefetch race.
+	restoredLog := filepath.Join(restored.Pgctld.PoolerDir, "pg_data", "postgresql.log")
+	requireLogLine(t, restoredLog,
+		fmt.Sprintf("restored log file \"%s\" from archive", seg2),
+		"the retried segment must have been replayed from the archive")
+	log, err := os.ReadFile(restoredLog)
+	require.NoError(t, err)
+	require.Regexp(t, fmt.Sprintf(`(?m)archive-get command begin [^\n]*\[%s, [^\n]* --archive-async(?: |$)`, seg2),
+		string(log), "the retried segment must be requested with async archive-get enabled")
+	t.Logf("%s replayed the archive, including retried segment %s, with async archive-get enabled", restoredName, seg2)
 }
 
 // requireLogLine waits briefly for line to appear in the log at path: the
