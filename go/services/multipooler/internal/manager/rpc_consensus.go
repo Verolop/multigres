@@ -652,8 +652,8 @@ func (pm *MultipoolerManager) promoteLocked(ctx context.Context, req *consensusd
 	if _, err = pm.DoUpdateRule(ctx, ruleUpdate); err != nil {
 		return nil, mterrors.Wrap(err, "promote failed: could not write rule")
 	}
-	// Advertise PRIMARY + SERVING now that the rule has committed — this opens the
-	// gateway to write traffic, so it must run only after UpdateRule succeeds
+	// Advertise PRIMARY now that the rule has committed. Opening the gateway
+	// to write traffic must run only after UpdateRule succeeds
 	// (UpdateRule is the durability gate: it waits for sync-standby acknowledgment).
 	//
 	// Promotion has already waited for postgres to leave recovery AND for the new
@@ -666,11 +666,13 @@ func (pm *MultipoolerManager) promoteLocked(ctx context.Context, req *consensusd
 	// on re-promotion of the same pooler at a higher term, demoteToStandbyLocked
 	// left Type=PRIMARY but serving=DRAINING, and skipping this would strand the
 	// pooler at PRIMARY/DRAINING and prevent the gateway buffer from draining.
+	// Refresh the replicated migration hold before opening serving: the last
+	// monitor tick may predate the IMPORT, and promotion must not expose its
+	// partial target until the next tick restores DRAINING.
+	pm.refreshMigrationHoldAfterPromotion(ctx)
 	if err := pm.stateManager.Mutate(ctx, func(s *servingStateMutation) {
 		s.PostgresMode = pgmode.Primary
-		if s.ServingStatus == clustermetadatapb.PoolerServingStatus_DRAINING {
-			s.ServingStatus = clustermetadatapb.PoolerServingStatus_SERVING
-		}
+		s.ServingStatus = reconciledServingStatus(s.ServingStatus, pm.migrationServingHold())
 	}); err != nil {
 		pm.logger.WarnContext(ctx, "failed to update serving state after promote", "error", err)
 	}

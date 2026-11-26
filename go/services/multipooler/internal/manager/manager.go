@@ -280,7 +280,8 @@ type MultipoolerManager struct {
 	// migrationImportHold is the migration serving gate, stored as a
 	// migrationHoldState: held when an active migration on this shard is in
 	// the IMPORT direction, so this pooler must not serve client queries
-	// until it is activated. The zero value is migrationHoldUnknown, distinct
+	// until it is activated, or while promotion resolves its migration state.
+	// The zero value is migrationHoldUnknown, distinct
 	// from migrationHoldNotHeld, so callers can tell "never successfully
 	// read" from "confirmed clear" instead of conflating the two into a
 	// single false. Refreshed from the replicated multigres.migration table
@@ -288,6 +289,12 @@ type MultipoolerManager struct {
 	// survives failover, and read by the serving-state drift check. Atomic so
 	// the monitor reads it without pm.mu.
 	migrationImportHold atomic.Int32
+	// Protect the read generation and result publication, never database I/O.
+	// Successful newer reads supersede older reads. Promotion and import drain
+	// publish a hold that also supersedes every read started before them.
+	migrationHoldMu                  sync.Mutex
+	migrationHoldGeneration          uint64
+	migrationHoldPublishedGeneration uint64
 }
 
 // promotionState tracks which parts of the promotion are complete

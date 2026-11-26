@@ -15,6 +15,7 @@
 package manager
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -68,57 +69,76 @@ func migrationRow(id string) *sqltypes.Row {
 // read the table afresh: answering from the earlier read reports the running
 // migration as not found and leaves it unreconciled for the life of the process.
 func TestPromoteForgetsMigrationsReadBeforeTheTenure(t *testing.T) {
-	selfID := &clustermetadatapb.ID{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "test-pooler"}
-	coordinatorA := &clustermetadatapb.ID{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "coordinator-a"}
-	otherPooler := &clustermetadatapb.ID{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "other-pooler"}
-	recruitedTerm := &clustermetadatapb.TermRevocation{
-		RevokedBelowTerm:       7,
-		AcceptedCoordinatorId:  coordinatorA,
-		CoordinatorInitiatedAt: recruitTS,
-		OutgoingRule:           &clustermetadatapb.RuleNumber{CoordinatorTerm: 0, LeaderSubterm: 1},
+	for _, readFails := range []bool{false, true} {
+		name := "migration read succeeds"
+		if readFails {
+			name = "migration read fails"
+		}
+		t.Run(name, func(t *testing.T) {
+			selfID := &clustermetadatapb.ID{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "test-pooler"}
+			coordinatorA := &clustermetadatapb.ID{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "coordinator-a"}
+			otherPooler := &clustermetadatapb.ID{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "other-pooler"}
+			recruitedTerm := &clustermetadatapb.TermRevocation{
+				RevokedBelowTerm:       7,
+				AcceptedCoordinatorId:  coordinatorA,
+				CoordinatorInitiatedAt: recruitTS,
+				OutgoingRule:           &clustermetadatapb.RuleNumber{CoordinatorTerm: 0, LeaderSubterm: 1},
+			}
+			req := &consensusdatapb.PromoteRequest{
+				Proposal: &consensusdatapb.CoordinatorProposal{
+					TermRevocation: recruitedTerm,
+					ProposalLeader: &clustermetadatapb.PoolerAddress{Id: selfID, Host: "pg-primary.internal", PostgresPort: 5432},
+					ProposedTransition: &clustermetadatapb.RulePosition{Proposal: &clustermetadatapb.ShardRule{
+						RuleNumber:    &clustermetadatapb.RuleNumber{CoordinatorTerm: 7},
+						CohortMembers: []*clustermetadatapb.ID{selfID, otherPooler},
+						CoordinatorId: coordinatorA,
+						CreationTime:  ruleCreatedTS,
+					}},
+				},
+			}
+			ref := migration.Ref{ID: 1794851141667694486}
+
+			m := mock.NewQueryService()
+			// Before bootstrap: postgres is out of recovery and holds no migrations.
+			m.AddQueryPatternOnce("SELECT pg_is_in_recovery",
+				mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"f"}}))
+			m.AddQueryPatternOnce(selectMigrationsPattern, &sqltypes.Result{})
+			expectLeaderPromoteMocks(m)
+			// After promotion: the migration has arrived by physical replication.
+			m.AddQueryPatternOnce("SELECT pg_is_in_recovery",
+				mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"f"}}))
+			m.AddQueryPatternOnce(selectMigrationsPattern, &sqltypes.Result{Rows: []*sqltypes.Row{migrationRow("1794851141667694486")}})
+
+			pm, tmpDir := setupManagerWithMockDB(t, m, &fakeRuleStore{pos: makeRulePosition(0)})
+			// The replicated IMPORT now holds serving, even if this node's last
+			// monitor tick ran before the migration arrived.
+			if readFails {
+				m.AddQueryPatternWithError(`SELECT count\(\*\) FROM multigres\.migration`,
+					errors.New("migration read unavailable"))
+			} else {
+				m.AddQueryPattern(`SELECT count\(\*\) FROM multigres\.migration`,
+					mock.MakeQueryResult([]string{"count"}, [][]any{{"1"}}))
+			}
+			consensustest.SeedTerm(t, tmpDir, recruitedTerm)
+			_, err := pm.consensusMgr.Promises().Load()
+			require.NoError(t, err)
+
+			coord, err := pm.MigrationCoordinatorIfPrimary(t.Context())
+			require.NoError(t, err)
+			_, err = coord.GetMigration(t.Context(), ref, "")
+			require.ErrorIs(t, err, migration.ErrNotFound, "before bootstrap there is no migration")
+
+			_, err = pm.Promote(t.Context(), req)
+			require.NoError(t, err)
+			assert.Equal(t, clustermetadatapb.PoolerServingStatus_DRAINING,
+				pm.PoolerRecord().GetServingStatus(), "promotion must not open an importing target to application traffic")
+
+			coord, err = pm.MigrationCoordinatorIfPrimary(t.Context())
+			require.NoError(t, err)
+			got, err := coord.GetMigration(t.Context(), ref, "")
+			require.NoError(t, err, "the promoted primary must see the migration it inherited")
+			assert.Equal(t, migration.PhaseCopying, got.Phase)
+			assert.NoError(t, m.ExpectationsWereMet())
+		})
 	}
-	req := &consensusdatapb.PromoteRequest{
-		Proposal: &consensusdatapb.CoordinatorProposal{
-			TermRevocation: recruitedTerm,
-			ProposalLeader: &clustermetadatapb.PoolerAddress{Id: selfID, Host: "pg-primary.internal", PostgresPort: 5432},
-			ProposedTransition: &clustermetadatapb.RulePosition{Proposal: &clustermetadatapb.ShardRule{
-				RuleNumber:    &clustermetadatapb.RuleNumber{CoordinatorTerm: 7},
-				CohortMembers: []*clustermetadatapb.ID{selfID, otherPooler},
-				CoordinatorId: coordinatorA,
-				CreationTime:  ruleCreatedTS,
-			}},
-		},
-	}
-	ref := migration.Ref{ID: 1794851141667694486}
-
-	m := mock.NewQueryService()
-	// Before bootstrap: postgres is out of recovery and holds no migrations.
-	m.AddQueryPatternOnce("SELECT pg_is_in_recovery",
-		mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"f"}}))
-	m.AddQueryPatternOnce(selectMigrationsPattern, &sqltypes.Result{})
-	expectLeaderPromoteMocks(m)
-	// After promotion: the migration has arrived by physical replication.
-	m.AddQueryPatternOnce("SELECT pg_is_in_recovery",
-		mock.MakeQueryResult([]string{"pg_is_in_recovery"}, [][]any{{"f"}}))
-	m.AddQueryPatternOnce(selectMigrationsPattern, &sqltypes.Result{Rows: []*sqltypes.Row{migrationRow("1794851141667694486")}})
-
-	pm, tmpDir := setupManagerWithMockDB(t, m, &fakeRuleStore{pos: makeRulePosition(0)})
-	consensustest.SeedTerm(t, tmpDir, recruitedTerm)
-	_, err := pm.consensusMgr.Promises().Load()
-	require.NoError(t, err)
-
-	coord, err := pm.MigrationCoordinatorIfPrimary(t.Context())
-	require.NoError(t, err)
-	_, err = coord.GetMigration(t.Context(), ref, "")
-	require.ErrorIs(t, err, migration.ErrNotFound, "before bootstrap there is no migration")
-
-	_, err = pm.Promote(t.Context(), req)
-	require.NoError(t, err)
-
-	coord, err = pm.MigrationCoordinatorIfPrimary(t.Context())
-	require.NoError(t, err)
-	got, err := coord.GetMigration(t.Context(), ref, "")
-	require.NoError(t, err, "the promoted primary must see the migration it inherited")
-	assert.Equal(t, migration.PhaseCopying, got.Phase)
-	assert.NoError(t, m.ExpectationsWereMet())
 }
